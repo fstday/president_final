@@ -4,42 +4,54 @@ import django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
 django.setup()
 
-from reminder.models import Reception
+from reminder.models import Appointment, Call, Patient
 
 
 def add_patient_info():
-    contacts = Reception.objects.all()
+    """
+    Links patient information with appointments by matching phone numbers and updates
+    them with status and audio link information from Call records.
 
-    if not contacts:
-        print('No contacts found')
+    This function has been updated to work with the new database structure.
+    """
+    # Get all appointments
+    appointments = Appointment.objects.filter(is_active=True)
+
+    if not appointments:
+        print('No appointments found')
         return
 
-    for contact in contacts:
-        print(f'Processing contact: {contact.full_name} ({contact.phone_number})')
+    for appointment in appointments:
+        print(f'Processing appointment: {appointment.appointment_id} for patient {appointment.patient.full_name}')
 
-        upload_result = Reception.objects.filter(key=str(contact.phone_number)).last()
+        # Check if the patient has a phone number
+        if not appointment.patient.phone_mobile:
+            print(f'No phone number for patient: {appointment.patient.full_name}')
+            continue
 
-        if upload_result:
-            order = upload_result.order
-            print(f'Found upload result: order {order}')
+        # Look for calls associated with this appointment
+        calls = Call.objects.filter(appointment=appointment)
 
-            audio_info = Reception.objects.filter(order_key=order).first()
+        if not calls:
+            print(f'No calls found for appointment: {appointment.appointment_id}')
+            continue
 
-            status_info = Reception.objects.filter(order=order).first()
+        # Get the latest call
+        latest_call = calls.order_by('-created_at').first()
 
-            if audio_info:
-                Reception.objects.update_or_create(
-                    phone_number=contact.phone_number,
-                    full_name=contact.full_name,
-                    status=status_info.status_id,
-                    link_to_audio=audio_info.audio_link,
-                    reception_start_time=contact.reception_start_time,
-                )
-                print(f'Added PatientInfo for {contact.full_name}')
-            else:
-                print(f'No audio info for order {order}')
+        if latest_call:
+            # Update appointment with status and audio link from call
+            if latest_call.status_id:
+                appointment.status = latest_call.status_id
+
+            if latest_call.audio_link:
+                # Audio link is stored in the Call model in the new structure
+                print(f'Found audio link for call: {latest_call.audio_link}')
+
+            appointment.save()
+            print(f'Updated appointment {appointment.appointment_id} with call information')
         else:
-            print(f'No upload result for phone number {contact.phone_number}')
+            print(f'No call details found for appointment: {appointment.appointment_id}')
 
 
 if __name__ == '__main__':

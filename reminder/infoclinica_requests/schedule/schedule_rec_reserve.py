@@ -1,41 +1,37 @@
 from dotenv import load_dotenv
-
+import requests
+import os
+import django
+import logging
+import xml.etree.ElementTree as ET
+import redis
+from datetime import datetime
+from django.utils import timezone
+from reminder.models import *
 from reminder.infoclinica_requests.utils import compare_times_for_redis, compare_times, redis_reception_appointment, \
     compare_and_suggest_times
 
 load_dotenv()
-
-import requests
-import os
-import django
-import json
-import logging
-import xml.etree.ElementTree as ET
-import redis
-
-from requests.auth import HTTPBasicAuth
-from datetime import datetime
-from reminder.models import *
-redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
-
-
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
 django.setup()
-logger = logging.getLogger(__name__)
-load_dotenv()
-infoclinica_api_url = os.getenv('INFOCLINICA_BASE_URL')
-infoclinica_x_forwarded_host=os.getenv('INFOCLINICA_HOST')
 
-# Пути к сертификатам
+logger = logging.getLogger(__name__)
+redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
+
+infoclinica_api_url = os.getenv('INFOCLINICA_BASE_URL')
+infoclinica_x_forwarded_host = os.getenv('INFOCLINICA_HOST')
+
+# Paths to certificates
 base_dir = os.path.dirname(os.path.abspath(__file__))
-certs_dir = os.path.join(base_dir, '../old_integration/certs')
+certs_dir = os.path.join(base_dir, 'certs')
 os.makedirs(certs_dir, exist_ok=True)
 cert_file_path = os.path.join(certs_dir, 'cert.pem')
 key_file_path = os.path.join(certs_dir, 'key.pem')
 current_date_time_for_xml = datetime.now().strftime('%Y%m%d%H%M%S')
 
 
-def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj, schedident_text, free_intervals, is_reschedule=False, schedid=None):
+def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj, schedident_text, free_intervals,
+                         is_reschedule=False, schedid=None):
     """
     Функция резервирует время при его успешном нахождении в свободных окошках.
     Отправляет XML запрос и резервирует свободное время за клиентом. Метод: WEB_SCHEDULE_REC_RESERVE
@@ -58,12 +54,61 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
 
         # Получаем информацию о филиале через очередь пациента
         latest_queue = found_patient.queue_entries.order_by('-created_at').first()
-        if latest_queue and latest_queue.clinic_id_msh_99:
-            filial_id = latest_queue.clinic_id_msh_99.clinic_id
-        elif latest_queue and latest_queue.branch:
+
+        # Инициализируем ID филиала значением по умолчанию
+        filial_id = 1
+
+        # Если очередь существует, получаем ID филиала из ветви
+        if latest_queue and latest_queue.branch:
             filial_id = latest_queue.branch.clinic_id
-        else:
-            filial_id = 1  # Значение по умолчанию
+
+        # Также проверяем, есть ли у пациента активная запись с информацией о клинике
+        latest_appointment = Appointment.objects.filter(
+            patient=found_patient,
+            is_active=True
+        ).order_by('-created_at').first()
+
+        if latest_appointment and latest_appointment.clinic:
+            filial_id = latest_appointment.clinic.clinic_id
+
+        # Найти доктора по doctor_id
+        doctor = None
+        try:
+            doctor = Doctor.objects.get(doctor_code=doctor_id)
+            logger.info(f"Найден врач: {doctor.full_name}")
+        except Doctor.DoesNotExist:
+            logger.warning(f"Врач с кодом {doctor_id} не найден")
+
+        # Найти клинику по filial_id
+        clinic = None
+        try:
+            clinic = Clinic.objects.get(clinic_id=filial_id)
+            logger.info(f"Найдена клиника: {clinic.name}")
+        except Clinic.DoesNotExist:
+            logger.warning(f"Клиника с ID {filial_id} не найдена")
+
+        # Получить причину и отделение из QueueInfo, если возможно
+        reason = None
+        department = None
+
+        if latest_queue:
+            # Получаем причину из очереди
+            reason = latest_queue.reason
+            if reason:
+                logger.info(f"Получена причина из очереди: {reason.reason_name}")
+
+            # Если у доктора есть отделение, используем его
+            if doctor and doctor.department:
+                department = doctor.department
+                logger.info(f"Получено отделение от врача: {department.name}")
+            # Иначе проверяем инфо о департаменте в очереди
+            elif latest_queue.department_number:
+                try:
+                    department = Department.objects.filter(department_id=latest_queue.department_number).first()
+                    if department:
+                        logger.info(f"Получено отделение из очереди: {department.name}")
+                except Exception as e:
+                    logger.warning(f"Ошибка при получении отделения: {str(e)}")
 
     except Patient.DoesNotExist:
         return {'status': 'error', 'message': 'Пациент не найден.'}
@@ -75,7 +120,10 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
 
     logger.info(f'DATE OBJECT {date_obj}')
     if isinstance(result_time, str):
-        result_time = datetime.strptime(result_time, '%Y-%m-%d %H:%M')
+        try:
+            result_time = datetime.strptime(result_time, '%Y-%m-%d %H:%M')
+        except ValueError:
+            return {'status': 'error', 'message': 'Неверный формат даты. Ожидаемый формат: YYYY-MM-DD HH:MM.'}
 
     bhour, bmin = result_time.hour, result_time.minute
     logger.info(f"Время для резервирования: {bhour}:{bmin}")
@@ -179,11 +227,16 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                         schedid_element = root.find(".//ns:SCHEDID", namespace)
                         if schedid_element is not None and schedid_element.text:
                             schedid_value = int(schedid_element.text)
-                            # Создаем или обновляем запись на прием
+
+                            # Создаем или обновляем запись на прием СО ВСЕМИ СВЯЗЯМИ
                             appointment, created = Appointment.objects.update_or_create(
                                 appointment_id=schedid_value,
                                 defaults={
                                     'patient': found_patient,
+                                    'doctor': doctor,
+                                    'clinic': clinic,
+                                    'department': department,
+                                    'reason': reason,
                                     'is_infoclinica_id': True,
                                     'start_time': date_obj,
                                     'end_time': date_obj + timezone.timedelta(minutes=30),
@@ -193,7 +246,7 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                             logger.info(f"{'Создана' if created else 'Обновлена'} запись на прием: {appointment}")
 
                         # Обновляем данные, если это перенос
-                        if is_reschedule:
+                        if is_reschedule and schedid:
                             try:
                                 # Поиск существующей записи
                                 old_appointment = Appointment.objects.get(appointment_id=schedid)
@@ -228,11 +281,11 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                         answer = {
                             'status': 'suggest_times',
                             'suggested_times': available_times,
-                            'message': f'Время приема {result_time} занято. Возвращаю ближайшие 10 свободных времен по записи',
+                            'message': f'Время приема {result_time} занято. Возвращаю ближайшие свободные времена для записи',
                             'action': 'reserve'
                         }
 
-                        logger.info("Возвращаю из schedule_rec_reserve:", answer)
+                        logger.info(f"Возвращаю из schedule_rec_reserve: {answer}")
                         return answer
 
                     else:

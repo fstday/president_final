@@ -9,19 +9,27 @@ from collections import defaultdict
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
 django.setup()
 
-from reminder.models import Reception, Call
+from reminder.models import Appointment, Call
 from reminder.properties.utils import ACS_BASE_URL
 
 from reminder.properties.utils import get_latest_api_key
 
 
 def fetch_audio_data(keys_str):
+    """
+    Fetches audio data from the ACS API for the given order keys.
+
+    Args:
+        keys_str: Comma-separated string of order keys
+
+    Returns:
+        Tuple (data, error) where data is the API response and error is any error message
+    """
     if not keys_str:
         return None, 'No keys found in the database.'
 
     api_key = get_latest_api_key()
     if api_key:
-
         url = f'{ACS_BASE_URL}/api/v2/orders/public/{api_key}/get_calls?keys={keys_str}'
 
         try:
@@ -33,40 +41,52 @@ def fetch_audio_data(keys_str):
 
 
 def process_audio_data(audio_data_list):
+    """
+    Processes audio data from the API and updates Call records with audio links.
+
+    Args:
+        audio_data_list: List of audio data from the API
+    """
     if not audio_data_list:
-        print("Список аудиоданных пуст.")
+        print("Audio data list is empty.")
         return
 
-    # Словарь для хранения записей по ключу ордера
+    # Dictionary to store records by order key
     audio_data_by_key = defaultdict(list)
 
-    # Группируем записи по ключам ордера
+    # Group records by order keys
     for audio_data in audio_data_list:
         order_key = audio_data.get('order_key')
         if order_key:
             audio_data_by_key[order_key].append(audio_data)
 
-    # Проходим по сгруппированным записям и выбираем последнюю по времени
+    # Process grouped records and select the latest for each
     for order_key, audio_records in audio_data_by_key.items():
-        # Выбираем запись с самой поздней датой
+        # Select the record with the latest date
         last_audio_data = max(audio_records, key=lambda x: datetime.strptime(x['time'], '%Y-%m-%d %H:%M:%S'))
 
         audio_link = last_audio_data.get('link')
 
         if order_key and audio_link:
-            # Найдем запись Call по ключу ордера
+            # Find the Call record by order key
             call = Call.objects.filter(order_key=order_key).first()
 
             if call:
-                # Обновляем ссылку на аудиозапись
+                # Update the audio link
                 call.audio_link = audio_link
                 call.save()
-                print(f"Обновлена аудиоссылка для звонка с ключом: {order_key}")
+                print(f"Updated audio link for call with order key: {order_key}")
             else:
-                print(f"Звонок с ключом ордера {order_key} не найден.")
+                print(f"Call with order key {order_key} not found.")
 
 
 def get_audio_data():
+    """
+    Main function to fetch and process audio data for all unprocessed calls.
+
+    Returns:
+        Tuple (audio_data, error) where audio_data is the combined API responses and error is any error message
+    """
     offset = 0
     all_audio_data = []
 
@@ -95,8 +115,19 @@ def get_audio_data():
 
 
 def get_keys_batch(batch_size=5, offset=0):
-    # Фильтруем только те звонки, у которых is_added=False
-    keys = Call.objects.filter(is_added=False).order_by('-id')[offset:offset + batch_size].values_list('order_key', flat=True)
+    """
+    Gets a batch of order keys from Call records that have not been processed.
+
+    Args:
+        batch_size: Number of keys to fetch
+        offset: Offset to start from
+
+    Returns:
+        List of order keys
+    """
+    # Filter only calls that have is_added=False
+    keys = Call.objects.filter(is_added=False).order_by('-id')[offset:offset + batch_size].values_list('order_key',
+                                                                                                       flat=True)
     return list(keys)
 
 

@@ -1,3 +1,9 @@
+import os
+import django
+
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
+django.setup()
+
 from dotenv import load_dotenv
 
 from reminder.infoclinica_requests.schedule.schedule_rec_reserve import schedule_rec_reserve
@@ -16,9 +22,6 @@ from requests.auth import HTTPBasicAuth
 from datetime import datetime
 from reminder.models import *
 
-
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
-django.setup()
 logger = logging.getLogger(__name__)
 load_dotenv()
 infoclinica_api_url = os.getenv('INFOCLINICA_BASE_URL')
@@ -26,7 +29,7 @@ infoclinica_x_forwarded_host=os.getenv('INFOCLINICA_HOST')
 
 # Пути к сертификатам
 base_dir = os.path.dirname(os.path.abspath(__file__))
-certs_dir = os.path.join(base_dir, '../old_integration/certs')
+certs_dir = os.path.join(base_dir, 'certs')
 os.makedirs(certs_dir, exist_ok=True)
 cert_file_path = os.path.join(certs_dir, 'cert.pem')
 key_file_path = os.path.join(certs_dir, 'key.pem')
@@ -34,36 +37,38 @@ key_file_path = os.path.join(certs_dir, 'key.pem')
 
 def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
     """
-    Обновленная функция для работы с новой моделью Appointment.
+    Updated function to work with the new Appointment model.
     """
-    logger.info(f"🚀 Запуск reserve_reception_for_patient с patient_id={patient_id}, "
+    logger.info(f"🚀 Starting reserve_reception_for_patient with patient_id={patient_id}, "
                 f"date_from_patient={date_from_patient}, trigger_id={trigger_id}")
 
-    global target_filial_id
+    doctor_id = None  # Initialize variable to avoid potential reference errors
+    target_filial_id = 1  # Default value
+
     try:
         found_patient = Patient.objects.get(patient_code=patient_id)
-        # Ищем активную запись на прием
+        # Look for active appointment
         existing_appointment = Appointment.objects.filter(
             patient=found_patient,
             is_active=True,
-            is_infoclinica_id=True  # Если это запись из Infoclinica
+            is_infoclinica_id=True  # If this is a record from Infoclinica
         ).first()
         is_reschedule = existing_appointment is not None
         schedid = existing_appointment.appointment_id if is_reschedule else None
 
-        # Находим последнюю запись на прием для этого пациента
+        # Find the latest appointment for this patient
         latest_appointment = Appointment.objects.filter(
             patient=found_patient,
             is_active=True
         ).order_by('-created_at').first()
 
         if latest_appointment:
-            # Получаем код врача из модели Doctor
+            # Get doctor code from Doctor model
             if latest_appointment.doctor:
                 doctor_id = latest_appointment.doctor.doctor_code
                 print(f"Doctor ID from appointment: {doctor_id}")
             else:
-                # Если нет врача в модели Appointment, пробуем получить из QueueInfo
+                # If no doctor in Appointment model, try to get from QueueInfo
                 latest_queue = QueueInfo.objects.filter(
                     patient=found_patient
                 ).order_by('-created_at').first()
@@ -75,15 +80,15 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
                     print("⚠️ No doctor_code found")
                     return {
                         'status': 'error',
-                        'message': 'Не найден код врача для данного пациента'
+                        'message': 'Doctor code not found for this patient'
                     }
 
-            # Получаем целевую клинику из модели Appointment
+            # Get target clinic from Appointment model
             if latest_appointment.clinic:
                 target_filial_id = latest_appointment.clinic.clinic_id
                 print(f"Target clinic ID from appointment: {target_filial_id}")
             else:
-                # Если нет клиники в модели Appointment, пробуем получить из QueueInfo
+                # If no clinic in Appointment model, try to get from QueueInfo
                 latest_queue = QueueInfo.objects.filter(
                     patient=found_patient
                 ).order_by('-created_at').first()
@@ -92,44 +97,67 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
                     target_filial_id = latest_queue.branch.clinic_id
                     print(f"Target clinic ID from queue: {target_filial_id}")
                 else:
-                    target_filial_id = 1  # Значение по умолчанию
+                    target_filial_id = 1  # Default value
                     print(f"Using default target clinic ID: {target_filial_id}")
         else:
-            # Если нет записей в модели Appointment, пробуем найти из QueueInfo
+            # If no appointments in Appointment model, try to find from QueueInfo
             latest_queue = QueueInfo.objects.filter(
                 patient=found_patient
             ).order_by('-created_at').first()
 
             if latest_queue:
-                doctor_id = latest_queue.doctor_code
-                print(f"Doctor ID from queue: {doctor_id}")
+                if latest_queue.doctor_code:
+                    doctor_id = latest_queue.doctor_code
+                    print(f"Doctor ID from queue: {doctor_id}")
+                else:
+                    print("⚠️ No doctor_code found in queue")
+                    return {
+                        'status': 'error',
+                        'message': 'No doctor code found for this patient'
+                    }
 
                 if latest_queue.branch:
                     target_filial_id = latest_queue.branch.clinic_id
                     print(f"Target clinic ID from queue: {target_filial_id}")
                 else:
-                    target_filial_id = 1  # Значение по умолчанию
+                    target_filial_id = 1  # Default value
                     print(f"Using default target clinic ID: {target_filial_id}")
             else:
                 print("⚠️ No appointments or queue entries found for this patient")
                 return {
                     'status': 'error',
-                    'message': 'Не найдены записи для данного пациента'
+                    'message': 'No records found for this patient'
                 }
+
+        # Final check for doctor_id
+        if not doctor_id:
+            return {
+                'status': 'error',
+                'message': 'Unable to determine doctor ID'
+            }
+
+    except Patient.DoesNotExist:
+        print(f"❌ Patient with ID {patient_id} not found")
+        return {"status": "error", "message": f"Patient with ID {patient_id} not found"}
     except Exception as e:
         print(f"❌ Exception occurred: {str(e)}")
-        return {"status": "error", "message": f"Ошибка: {str(e)}"}
+        return {"status": "error", "message": f"Error: {str(e)}"}
 
-    # Парсим даты для отправки XML запроса
+    # Parse dates for XML request
     if isinstance(date_from_patient, str):
-        date_part, time_part = date_from_patient.split()
-        year, month, day = map(int, date_part.split('-'))
-        hour, minute = map(int, time_part.split(':'))
-        date_obj = datetime(year, month, day, hour, minute)
+        try:
+            date_part, time_part = date_from_patient.split()
+            year, month, day = map(int, date_part.split('-'))
+            hour, minute = map(int, time_part.split(':'))
+            date_obj = datetime(year, month, day, hour, minute)
+        except ValueError as e:
+            return {"status": "error", "message": f"Invalid date format: {str(e)}"}
     elif isinstance(date_from_patient, datetime):
         date_obj = date_from_patient
         date_part = date_obj.strftime('%Y-%m-%d')
         time_part = date_obj.strftime('%H:%M')
+    else:
+        return {"status": "error", "message": "Invalid date type"}
 
     beginning_formatted_date = date_obj.strftime('%Y%m%d')
     time_obj = date_obj.time()
@@ -236,19 +264,33 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
                     logger.info(answer)
                     return answer
 
-                elif result_time:
-                    logger.info(f'Найдено подходящее время {result_time}')
+                # Replace this code in reserve_reception_for_patient.py
 
-                    # Проверяем, есть ли запись на прием для данного пациента
+                elif result_time:
+                    logger.info(f'Found suitable time {result_time}')
+
+                    # Check for existing appointments for this patient
                     try:
                         found_patient = Patient.objects.get(patient_code=patient_id)
-                        is_reschedule = found_patient.schedid is not None
-                        schedid = found_patient.schedid if is_reschedule else None
+
+                        # Look for active infoclinica appointments to determine if this is a reschedule
+                        existing_appointment = Appointment.objects.filter(
+                            patient=found_patient,
+                            is_active=True,
+                            is_infoclinica_id=True
+
+                        ).first()
+
+                        is_reschedule = existing_appointment is not None
+                        schedid = existing_appointment.appointment_id if is_reschedule else None
+
+
                     except Patient.DoesNotExist:
-                        # Обработка ошибки, если пациент не найден
-                        return {"status": "error", "message": "Пациент не найден"}
+                        # Handle error if patient not found
+                        return {"status": "error", "message": "Patient not found"}
+
                     except Exception as e:
-                        logger.error(f"Ошибка при проверке существующих записей: {str(e)}")
+                        logger.error(f"Error checking existing appointments: {str(e)}")
                         is_reschedule = False
                         schedid = None
 
@@ -263,6 +305,7 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
                         is_reschedule=is_reschedule,
                         schedid=schedid
                     )
+
                     logger.info(answer)
                     return answer
 
@@ -299,6 +342,6 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
 
 
 patient_code = '990000612'
-year_from_patient_for_returning = "2025-03-17 19:00"
+year_from_patient_for_returning = "2025-03-17 17:00"
 
 reserve_reception_for_patient(patient_code, year_from_patient_for_returning, trigger_id=1)

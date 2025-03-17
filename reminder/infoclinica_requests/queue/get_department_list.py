@@ -9,7 +9,7 @@ django.setup()
 from dotenv import load_dotenv
 from datetime import datetime
 from reminder.models import *
-from reminder.utils.utils import generate_msh_10
+from reminder.infoclinica_requests.utils import generate_msh_10
 from django.utils.dateparse import parse_date
 from django.db import transaction
 
@@ -29,7 +29,7 @@ infoclinica_x_forwarded_host = os.getenv('INFOCLINICA_HOST')
 
 # Пути к сертификатам
 base_dir = os.path.dirname(os.path.abspath(__file__))
-certs_dir = os.path.join(base_dir, '../old_integration/certs')
+certs_dir = os.path.join(base_dir, 'certs')
 os.makedirs(certs_dir, exist_ok=True)
 cert_file_path = os.path.join(certs_dir, 'cert.pem')
 key_file_path = os.path.join(certs_dir, 'key.pem')
