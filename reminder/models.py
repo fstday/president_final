@@ -16,6 +16,7 @@ def generate_uuid():
 def calculate_expiry():
     return now() + timedelta(hours=24)
 
+
 class BatchTimeout(models.Model):
     batch_timeout_seconds = models.IntegerField()
 
@@ -52,6 +53,7 @@ class Thread(models.Model):
             return True
         return self.current_run.status == Run.Status.COMPLETED
 
+
 class AigerimApiToken(models.Model):
     access_token = models.CharField(max_length=255)
     refresh_token = models.CharField(max_length=255)
@@ -59,7 +61,6 @@ class AigerimApiToken(models.Model):
 
     def __str__(self):
         return f"Access Token: {self.access_token}, {self.created_at}"
-
 
 
 class Run(models.Model):
@@ -81,6 +82,7 @@ class Run(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name=_('Creation Timestamp'))
     run_expired_at = models.DateTimeField(null=True, blank=True, verbose_name=_('Run Expiration Timestamp'))
+
 
 class Reception(models.Model):
     patient_code = models.BigIntegerField()
@@ -106,6 +108,7 @@ class Reception(models.Model):
 
     def __str__(self):
         return f"Reception {self.reception_code} for patient {self.name} {self.lastname} ({self.patient_code}) created at {self.upload_time}"
+
 
 class Call(models.Model):
     reception = models.ForeignKey(Reception, on_delete=models.CASCADE, related_name="calls")
