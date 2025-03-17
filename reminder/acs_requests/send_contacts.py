@@ -2,7 +2,7 @@ import os
 import django
 import requests
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'Kravcov_notif.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
 django.setup()
 
 from reminder.properties.utils import ACS_BASE_URL

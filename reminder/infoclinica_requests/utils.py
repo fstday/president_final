@@ -12,16 +12,17 @@ import time
 import django
 import pytz
 import redis
+import uuid
 import base64
 import re
 from django.db.models.expressions import result
 from django.http import JsonResponse
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'infodent.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
 django.setup()
 
 from django.utils.timezone import make_aware
-from reminder.models import Reception, Call, ApiKey, IgnoredPatient
+from reminder.models import Appointment, Call, ApiKey, IgnoredPatient
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs12
@@ -290,3 +291,7 @@ def format_russian_date(date_obj):
 
     # Формируем строку в нужном формате
     return f"{day} {months[month]}"
+
+
+def generate_msh_10():
+    return uuid.uuid4().hex

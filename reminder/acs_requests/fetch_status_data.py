@@ -2,7 +2,7 @@ import requests
 import os
 import django
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'Kravcov_notif.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
 django.setup()
 
 from reminder.acs_requests.fetch_audio_data import get_keys_batch

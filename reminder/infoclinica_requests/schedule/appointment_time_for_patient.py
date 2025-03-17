@@ -1,13 +1,13 @@
 import os
 import django
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'Kravcov_notif.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
 django.setup()
 
 from django.http import JsonResponse
 from dotenv import load_dotenv
 
-from reminder.acs_requests.trash_orders import trash_orders
+# from reminder.acs_requests.trash_orders import trash_orders
 from reminder.infoclinica_requests.schedule.schedule_rec_reserve import current_date_time_for_xml
 from reminder.infoclinica_requests.utils import compare_times_for_redis, compare_times
 
@@ -22,7 +22,6 @@ import xml.etree.ElementTree as ET
 
 from requests.auth import HTTPBasicAuth
 from datetime import datetime
-from logger import logging
 from reminder.models import *
 
 logger = logging.getLogger(__name__)
@@ -46,26 +45,37 @@ def appointment_time_for_patient(patient_code, year_from_patient_for_returning):
     :return: result
     """
 
-    all_patients= Patient.objects.all()
+    all_patients = Patient.objects.all()
     found_patient = all_patients.get(patient_code=patient_code)
-    latest_queue = found_patient.queue_entries.order_by('-created_at').first()
-    if latest_queue:
-        # Get the target clinic ID
-        if latest_queue.clinic_id_msh_99:
-            target_filial_id = latest_queue.clinic_id_msh_99.clinic_id
-            print(f"Patient's target clinic ID: {target_filial_id}")
-        # Fallback to branch clinic if target is not available
-        elif latest_queue.branch:
-            target_filial_id = latest_queue.branch.clinic_id
-            print(f"Using source clinic ID: {target_filial_id}")
-        else:
-            # Default clinic ID if nothing found
-            target_filial_id = 1
-            print(f"No clinic found for patient, using default clinic ID: {target_filial_id}")
+
+    # Проверяем сначала записи на прием
+    appointment = Appointment.objects.filter(
+        patient=found_patient,
+        is_active=True
+    ).order_by('-start_time').first()
+
+    if appointment and appointment.clinic:
+        target_filial_id = appointment.clinic.clinic_id
     else:
-        # Default clinic ID if no queue entries found
-        target_filial_id = 1
-        print(f"No queue entries found for patient, using default clinic ID: {target_filial_id}")
+        # Если нет активных записей, пробуем получить из очереди
+        latest_queue = found_patient.queue_entries.order_by('-created_at').first()
+        if latest_queue:
+            # Get the target clinic ID
+            if latest_queue.clinic_id_msh_99:
+                target_filial_id = latest_queue.clinic_id_msh_99.clinic_id
+                print(f"Patient's target clinic ID: {target_filial_id}")
+            # Fallback to branch clinic if target is not available
+            elif latest_queue.branch:
+                target_filial_id = latest_queue.branch.clinic_id
+                print(f"Using source clinic ID: {target_filial_id}")
+            else:
+                # Default clinic ID if nothing found
+                target_filial_id = 1
+                print(f"No clinic found for patient, using default clinic ID: {target_filial_id}")
+        else:
+            # Default clinic ID if no queue entries found
+            target_filial_id = 1
+            print(f"No queue entries found for patient, using default clinic ID: {target_filial_id}")
 
     # Заголовки запроса
     headers = {

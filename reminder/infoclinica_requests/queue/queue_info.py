@@ -3,7 +3,7 @@ import django
 import re
 
 # Настройки Django
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'Kravcov_notif.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
 django.setup()
 
 from dotenv import load_dotenv

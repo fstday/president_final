@@ -2,13 +2,13 @@ import os
 import django
 
 # Настройки Django
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'Kravcov_notif.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
 django.setup()
 
 from dotenv import load_dotenv
 from datetime import datetime
 from reminder.models import *
-from reminder.utils.utils import generate_msh_10
+from reminder.infoclinica_requests.utils import generate_msh_10
 from django.utils.dateparse import parse_date
 from django.db import transaction
 

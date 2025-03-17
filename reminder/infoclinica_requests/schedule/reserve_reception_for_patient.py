@@ -17,7 +17,7 @@ from datetime import datetime
 from reminder.models import *
 
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'Kravcov_notif.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
 django.setup()
 logger = logging.getLogger(__name__)
 load_dotenv()

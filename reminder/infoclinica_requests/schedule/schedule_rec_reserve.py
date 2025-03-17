@@ -19,7 +19,7 @@ from reminder.models import *
 redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
 
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'Kravcov_notif.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
 django.setup()
 logger = logging.getLogger(__name__)
 load_dotenv()
