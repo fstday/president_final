@@ -36,129 +36,147 @@ cert_file_path = os.path.join(certs_dir, 'cert.pem')
 key_file_path = os.path.join(certs_dir, 'key.pem')
 
 
-def delete_reception_for_patient(patient_code):
+def delete_reception_for_patient(patient_id):
     """
-    Функция срабатывает после того как GPT направил нам ID - 2 на удаление записи клиента. Функция
-    отправляет запрос в INFODENT на нахождение ближайших записей у конкретного врача на конкретную дату.
-
-    :param patient_code: ID записи на прием
-
-    :return: answer
+    Обновленная функция для удаления записи на прием.
     """
-
     global clinic_id_msh_99_id
     answer = ''
     result_delete = 0
 
-    # Получаем пациента
     try:
-        patient = Patient.objects.get(patient_code=patient_code)
-    except Patient.DoesNotExist:
-        logger.error(f"Пациент с кодом {patient_code} не найден")
-        return {"status": "error", "message": "Пациент не найден"}
+        # Получаем пациента
+        patient = Patient.objects.get(patient_code=patient_id)
 
-    # Получаем филиал из QueueInfo
-    queue_entry = QueueInfo.objects.filter(patient=patient).first()
-    if queue_entry and queue_entry.clinic_id_msh_99:
-        clinic_id_msh_99_id = queue_entry.clinic_id_msh_99.clinic_id
+        # Получаем запись на прием для этого пациента
+        appointment = Appointment.objects.filter(patient=patient, is_active=True).order_by('-start_time').first()
+
+        if not appointment:
+            logger.error(f"Запись на прием для пациента с кодом {patient_id} не найдена")
+            return {"status": "error", "message": "Запись на прием не найдена"}
+
+        # Получаем идентификатор клиники
+        if appointment.clinic:
+            clinic_id_msh_99_id = appointment.clinic.clinic_id
+        else:
+            # Пытаемся получить из очереди
+            queue_entry = QueueInfo.objects.filter(patient=patient).first()
+            if queue_entry and queue_entry.branch:
+                clinic_id_msh_99_id = queue_entry.branch.clinic_id
+            else:
+                clinic_id_msh_99_id = 1  # Значение по умолчанию
+
         logger.info(f"clinic_id_msh_99_id: {clinic_id_msh_99_id}")
-    else:
-        logger.warning("Филиал клиники пациента не найден")
 
-    # Заголовки запроса
-    headers = {
-        'X-Forwarded-Host': f'{infoclinica_x_forwarded_host}',
-        'Content-Type': 'text/xml'
-    }
+        # Определяем ID записи для удаления
+        appointment_id = appointment.appointment_id
 
-    # Формируем XML запрос для удаления записи с указанием времени начала приема, если оно доступно
-    xml_request = f'''
-    <WEB_SCHEDULE_REC_REMOVE xmlns="http://sdsys.ru/" xmlns:tns="http://sdsys.ru/">
-      <MSH>
-          <MSH.7>
-          <TS.1>{current_date_time_for_xml}</TS.1>
-        </MSH.7>
-          <MSH.9>
-          <MSG.1>WEB</MSG.1>
-              <MSG.2>SCHEDULE_REC_REMOVE</MSG.2>
-        </MSH.9>
-          <MSH.10>74C0ACA47AFE4CED2B838996B0DF5821</MSH.10>
-        <MSH.18>UTF-8</MSH.18>
-          <MSH.99>{clinic_id_msh_99_id}</MSH.99> <!-- Идентификатор филиала -->
-      </MSH>
-      <SCHEDULE_REC_REMOVE_IN>
-          <SCHEDID>{patient.schedid}</SCHEDID> <!-- Идентификатор назначения -->
-      </SCHEDULE_REC_REMOVE_IN>
-    </WEB_SCHEDULE_REC_REMOVE>
-    '''
+        # Проверяем, что это ID из Infoclinica
+        if not appointment.is_infoclinica_id:
+            logger.error(f"ID {appointment_id} не является идентификатором Infoclinica")
+            return {"status": "error", "message": "Нельзя удалить запись, не созданную в Infoclinica"}
 
-    # Выполнение POST-запроса
-    response = requests.post(
-        url=infoclinica_api_url,
-        headers=headers,
-        data=xml_request,
-        cert=(cert_file_path, key_file_path)
-    )
+        # Заголовки запроса
+        headers = {
+            'X-Forwarded-Host': f'{infoclinica_x_forwarded_host}',
+            'Content-Type': 'text/xml'
+        }
 
-    # Проверка на ошибки и вывод ответа сервера
-    if response.status_code == 200:
-        try:
-            logger.debug(f"Тело ответа: {response.text[:500]}...")  # Логируем первые 500 символов ответа
+        # Формируем XML запрос для удаления записи
+        xml_request = f'''
+        <WEB_SCHEDULE_REC_REMOVE xmlns="http://sdsys.ru/" xmlns:tns="http://sdsys.ru/">
+          <MSH>
+              <MSH.7>
+              <TS.1>{current_date_time_for_xml}</TS.1>
+            </MSH.7>
+              <MSH.9>
+              <MSG.1>WEB</MSG.1>
+                  <MSG.2>SCHEDULE_REC_REMOVE</MSG.2>
+            </MSH.9>
+              <MSH.10>74C0ACA47AFE4CED2B838996B0DF5821</MSH.10>
+            <MSH.18>UTF-8</MSH.18>
+              <MSH.99>{clinic_id_msh_99_id}</MSH.99> <!-- Идентификатор филиала -->
+          </MSH>
+          <SCHEDULE_REC_REMOVE_IN>
+              <SCHEDID>{appointment_id}</SCHEDID> <!-- Идентификатор назначения -->
+          </SCHEDULE_REC_REMOVE_IN>
+        </WEB_SCHEDULE_REC_REMOVE>
+        '''
 
-            root = ET.fromstring(response.text)
-            namespace = {'ns': 'http://sdsys.ru/'}
+        # Выполнение POST-запроса
+        response = requests.post(
+            url=infoclinica_api_url,
+            headers=headers,
+            data=xml_request,
+            cert=(cert_file_path, key_file_path)
+        )
 
-            # Извлекаем значение SPRESULT (0 - неудачно, 1 - успешно) и SPCOMMENT (комментарий к результату)
-            sp_result_code = root.find('.//ns:SPRESULT', namespace)
-            sp_comment_text = root.find('.//ns:SPCOMMENT', namespace)
+        # Обработка ответа аналогична оригинальной функции
+        if response.status_code == 200:
+            try:
+                root = ET.fromstring(response.text)
+                namespace = {'ns': 'http://sdsys.ru/'}
 
-            # Ответ от сервера приходит в текстовом значении, переводим в число
-            sp_result = int(sp_result_code.text)
+                # Извлекаем значение SPRESULT (0 - неудачно, 1 - успешно) и SPCOMMENT (комментарий к результату)
+                sp_result_code = root.find('.//ns:SPRESULT', namespace)
+                sp_comment_text = root.find('.//ns:SPCOMMENT', namespace)
 
-            # Если элементы найдены, проверяем их значения
-            if sp_result is not None:
+                # Ответ от сервера приходит в текстовом значении, переводим в число
+                sp_result = int(sp_result_code.text)
 
-                # Обработка положительного удаления записи
-                if sp_result == 1:
-                    logger.info('Удаление произошло успешно')
-                    patient.delete()
+                # Если элементы найдены, проверяем их значения
+                if sp_result is not None:
+                    # Обработка положительного удаления записи
+                    if sp_result == 1:
+                        logger.info('Удаление произошло успешно')
 
-                    answer = {
-                        'status': 'success_delete',
-                        'message': f'Запись по ID приема: {patient.patient_code}, '
-                                   f'ФИО пациента: {patient.full_name}, успешно удалена'
-                    }
-                    logger.info(answer)
+                        # Помечаем запись как неактивную вместо полного удаления
+                        appointment.is_active = False
+                        appointment.save()
 
-                    return answer
+                        answer = {
+                            'status': 'success_delete',
+                            'message': f'Запись по ID приема: {appointment_id}, '
+                                       f'ФИО пациента: {patient.full_name}, успешно удалена'
+                        }
+                        logger.info(answer)
 
-                elif sp_result == 0:
-                    logger.info('Ошибка, удаления не произошло')
+                        return answer
 
-                    answer = {
-                        'status': 'fail_delete',
-                        'message': f'Ошибка, удаление записей на прием за прошедший период запрещено'
-                    }
-                    logger.info(answer)
+                    elif sp_result == 0:
+                        logger.info('Ошибка, удаления не произошло')
 
-                    return answer
+                        answer = {
+                            'status': 'fail_delete',
+                            'message': f'Ошибка, удаление записей на прием за прошедший период запрещено'
+                        }
+                        logger.info(answer)
+
+                        return answer
+
+                    else:
+                        answer = {
+                            'status': 'fail_delete',
+                            'message': f'Ошибка, пришел неверный код: {patient_id}'
+                        }
+                        logger.info(answer)
+
+                        return answer
 
                 else:
-                    answer = {
-                        'status': 'fail_delete',
-                        'message': f'Ошибка, пришел неверный код: {patient_code}'
-                    }
-                    logger.info(answer)
+                    logger.info('Не найдено значений ответа по SPRESULT в ответе сервера')
+            except ET.ParseError as e:
+                logger.info(f"Ошибка парсинга XML ответа: {e}")
+        else:
+            logger.info(f'Ошибка при запросе: {response.status_code}')
+            logger.info(f'Ответ сервера: {response.text}')
 
-                    return answer
-
-            else:
-                logger.info('Не найдено значений ответа по SPRESULT в ответе сервера')
-        except ET.ParseError as e:
-            logger.info(f"Ошибка парсинга XML ответа: {e}")
-    else:
-        logger.info(f'Ошибка при запросе: {response.status_code}')
-        logger.info(f'Ответ сервера: {response.text}')
+    except Patient.DoesNotExist:
+        logger.error(f"Пациент с кодом {patient_id} не найден")
+        return {"status": "error", "message": "Пациент не найден"}
+    except Exception as e:
+        logger.error(f"Ошибка при удалении записи: {str(e)}")
+        return {"status": "error", "message": f"Ошибка: {str(e)}"}
 
 
 delete_reception_for_patient('990000612')

@@ -14,7 +14,6 @@ import xml.etree.ElementTree as ET
 
 from requests.auth import HTTPBasicAuth
 from datetime import datetime
-from logger import logging
 from reminder.models import *
 
 
@@ -35,54 +34,86 @@ key_file_path = os.path.join(certs_dir, 'key.pem')
 
 def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
     """
-    Функция срабатывает после того как GPT направил нам айди - 1 на изменение времени записи клиента. Функция
-    отправляет запрос в INFODENT на нахождение ближайших записей у конкретного врача на конкретную дату.
+    Обновленная функция для работы с новой моделью Appointment.
     """
-
-
-    logger.info(f"🚀 Запуск reserve_reception_for_patient с patient_id={patient_id},"
-          f" date_from_patient={date_from_patient}, trigger_id={trigger_id}")
+    logger.info(f"🚀 Запуск reserve_reception_for_patient с patient_id={patient_id}, "
+                f"date_from_patient={date_from_patient}, trigger_id={trigger_id}")
 
     global target_filial_id
     try:
+        # Находим пациента по его коду
         found_patient = Patient.objects.get(patient_code=patient_id)
         print(f"✅ Найден пациент: {found_patient}")
 
-        # Debug queue entries
-        queue_entries = found_patient.queue_entries.all()
-        print(f"Number of queue entries: {queue_entries.count()}")
+        # Находим последнюю запись на прием для этого пациента
+        latest_appointment = Appointment.objects.filter(
+            patient=found_patient,
+            is_active=True
+        ).order_by('-created_at').first()
 
-        latest_queue = found_patient.queue_entries.order_by('-created_at').first()
-        print(f"Latest queue entry: {latest_queue}")
+        if latest_appointment:
+            # Получаем код врача из модели Doctor
+            if latest_appointment.doctor:
+                doctor_id = latest_appointment.doctor.doctor_code
+                print(f"Doctor ID from appointment: {doctor_id}")
+            else:
+                # Если нет врача в модели Appointment, пробуем получить из QueueInfo
+                latest_queue = QueueInfo.objects.filter(
+                    patient=found_patient
+                ).order_by('-created_at').first()
 
-        if latest_queue:
-            # Extract doctor_code from queue entry
-            doctor_id = latest_queue.doctor_code
-            print(f"Doctor ID from latest queue: {doctor_id}")
+                if latest_queue and latest_queue.doctor_code:
+                    doctor_id = latest_queue.doctor_code
+                    print(f"Doctor ID from queue: {doctor_id}")
+                else:
+                    print("⚠️ No doctor_code found")
+                    return {
+                        'status': 'error',
+                        'message': 'Не найден код врача для данного пациента'
+                    }
 
-            if not doctor_id:
-                print("⚠️ No doctor_code found in the latest queue entry")
+            # Получаем целевую клинику из модели Appointment
+            if latest_appointment.clinic:
+                target_filial_id = latest_appointment.clinic.clinic_id
+                print(f"Target clinic ID from appointment: {target_filial_id}")
+            else:
+                # Если нет клиники в модели Appointment, пробуем получить из QueueInfo
+                latest_queue = QueueInfo.objects.filter(
+                    patient=found_patient
+                ).order_by('-created_at').first()
+
+                if latest_queue and latest_queue.branch:
+                    target_filial_id = latest_queue.branch.clinic_id
+                    print(f"Target clinic ID from queue: {target_filial_id}")
+                else:
+                    target_filial_id = 1  # Значение по умолчанию
+                    print(f"Using default target clinic ID: {target_filial_id}")
+        else:
+            # Если нет записей в модели Appointment, пробуем найти из QueueInfo
+            latest_queue = QueueInfo.objects.filter(
+                patient=found_patient
+            ).order_by('-created_at').first()
+
+            if latest_queue:
+                doctor_id = latest_queue.doctor_code
+                print(f"Doctor ID from queue: {doctor_id}")
+
+                if latest_queue.branch:
+                    target_filial_id = latest_queue.branch.clinic_id
+                    print(f"Target clinic ID from queue: {target_filial_id}")
+                else:
+                    target_filial_id = 1  # Значение по умолчанию
+                    print(f"Using default target clinic ID: {target_filial_id}")
+            else:
+                print("⚠️ No appointments or queue entries found for this patient")
                 return {
                     'status': 'error',
-                    'message': 'Не найден код врача для данного пациента'
+                    'message': 'Не найдены записи для данного пациента'
                 }
-
-            # Get the target clinic ID
-            if latest_queue.clinic_id_msh_99:
-                target_filial_id = latest_queue.clinic_id_msh_99.clinic_id
-                print(f"Patient's target clinic ID: {target_filial_id}")
-            else:
-                print("⚠️ No clinic_id_msh_99 found in the latest queue entry")
-                # You might want to define a default target_filial_id here
-        else:
-            print("⚠️ No queue entries found for this patient")
-            return {
-                'status': 'error',
-                'message': 'Не найдены записи в очереди для данного пациента'
-            }
     except Exception as e:
         print(f"❌ Exception occurred: {str(e)}")
         return {"status": "error", "message": f"Ошибка: {str(e)}"}
+
     # Парсим даты для отправки XML запроса
     if isinstance(date_from_patient, str):
         date_part, time_part = date_from_patient.split()

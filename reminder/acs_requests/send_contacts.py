@@ -7,10 +7,13 @@ django.setup()
 
 from reminder.properties.utils import ACS_BASE_URL
 from reminder.properties.utils import get_latest_api_key
-from reminder.models import Reception, Call
+from reminder.models import Appointment, Call
 
 
-def send_order(order_data, reception_code, call_type):
+def send_order(order_data, appointment_id, call_type):
+    """
+    Обновленная функция для отправки данных заказа в ACS.
+    """
     api_key = get_latest_api_key()
     if api_key:
         url = f"{ACS_BASE_URL}/api/v2/bpm/public/bp/{api_key}/add_orders"
@@ -27,22 +30,23 @@ def send_order(order_data, reception_code, call_type):
                         try:
                             order_key = item.get('order', '')
                             if order_key:
-                                reception = Reception.objects.filter(reception_code=reception_code).first()
+                                # Находим запись на прием по appointment_id
+                                appointment = Appointment.objects.filter(appointment_id=appointment_id).first()
 
-                                if reception:
+                                if appointment:
                                     # Проверяем, есть ли уже звонок для указанного типа
-                                    call = Call.objects.filter(reception=reception, call_type=call_type).first()
+                                    call = Call.objects.filter(appointment=appointment, call_type=call_type).first()
 
                                     if not call:
                                         # Создаем новый звонок, если не существует
                                         Call.objects.create(
-                                            reception=reception,
+                                            appointment=appointment,
                                             order_key=order_key,
                                             call_type=call_type
                                         )
-                                        print(f"Создан новый звонок {call_type} для приема с кодом {reception_code}")
+                                        print(f"Создан новый звонок {call_type} для приема с кодом {appointment_id}")
                                     else:
-                                        print(f"Звонок {call_type} для приема с кодом {reception_code} уже существует.")
+                                        print(f"Звонок {call_type} для приема с кодом {appointment_id} уже существует.")
                         except Exception as e:
                             print(f"Error updating order: {e}")
                 return True  # Успешное выполнение, возвращаем True
