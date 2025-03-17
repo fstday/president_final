@@ -57,7 +57,7 @@ class AppointmentView(models.Model):
         verbose_name_plural = "Просмотр записей на прием"
 
 
-# SQL для создания представления (добавить в миграцию)
+# SQL для создания представления
 """
 CREATE OR REPLACE VIEW appointment_view AS
 SELECT 

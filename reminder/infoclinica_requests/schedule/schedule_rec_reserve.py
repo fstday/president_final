@@ -178,26 +178,36 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                     if sp_result == 1:
                         schedid_element = root.find(".//ns:SCHEDID", namespace)
                         if schedid_element is not None and schedid_element.text:
-                            found_patient.schedid = int(schedid_element.text)  # Используем found_patient, а не patient
-                            found_patient.save()
-                            logger.info(
-                                f"Сохранен идентификатор записи SCHEDID={found_patient.schedid} для пациента {found_patient.patient_code}")
+                            schedid_value = int(schedid_element.text)
+                            # Создаем или обновляем запись на прием
+                            appointment, created = Appointment.objects.update_or_create(
+                                appointment_id=schedid_value,
+                                defaults={
+                                    'patient': found_patient,
+                                    'is_infoclinica_id': True,
+                                    'start_time': date_obj,
+                                    'end_time': date_obj + timezone.timedelta(minutes=30),
+                                    'is_active': True
+                                }
+                            )
+                            logger.info(f"{'Создана' if created else 'Обновлена'} запись на прием: {appointment}")
 
-                        # Обновляем данные в Patient, если это перенос
+                        # Обновляем данные, если это перенос
                         if is_reschedule:
                             try:
-                                # Поиск объекта записи
-                                found_recep = Patient.objects.get(schedid=schedid)
+                                # Поиск существующей записи
+                                old_appointment = Appointment.objects.get(appointment_id=schedid)
 
                                 # Удаление старого времени из Redis
-                                previous_appointment_time_str = found_recep.start_time.strftime('%Y-%m-%d %H:%M:%S')
+                                previous_appointment_time_str = old_appointment.start_time.strftime('%Y-%m-%d %H:%M:%S')
                                 redis_client.delete(previous_appointment_time_str)
 
                                 # Обновляем время и дату
-                                found_recep.start_time = date_obj
-                                found_recep.save()
-                            except Reception.DoesNotExist:
-                                logger.warning(f"Запись с кодом {schedid} не найдена в Reception")
+                                old_appointment.start_time = date_obj
+                                old_appointment.end_time = date_obj + timezone.timedelta(minutes=30)
+                                old_appointment.save()
+                            except Appointment.DoesNotExist:
+                                logger.warning(f"Запись с ID {schedid} не найдена в Appointment")
 
                         # Заносим время и дату в Redis
                         appointment_time_str = date_obj.strftime('%Y-%m-%d %H:%M:%S')

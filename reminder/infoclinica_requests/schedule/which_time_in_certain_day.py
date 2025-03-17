@@ -26,15 +26,18 @@ def which_time_in_certain_day(reception_id, date_time):
         return JsonResponse({'status': 'error', 'message': f'Ошибка преобразования даты: {e}'}, status=400)
 
     patient = Patient.objects.get(patient_code=reception_id)
-    queue_entry = QueueInfo.objects.filter(patient=patient).first()
-
-    if queue_entry and queue_entry.doctor_code:
-        doctor_code = queue_entry.doctor_code
-        doctor_name = queue_entry.doctor_name
-        logger.info(f'Код доктора: {doctor_name}, имя доктора: {doctor_name}')
-
+    appointment = Appointment.objects.filter(patient=patient, is_active=True).first()
+    if appointment and appointment.doctor:
+        doctor_code = appointment.doctor.doctor_code
+        doctor_name = appointment.doctor.full_name
     else:
-        logger.info('Доктор и его код не найден в QueueInfo')
+        # Если нет активных записей, пробуем получить из QueueInfo
+        queue_entry = QueueInfo.objects.filter(patient=patient).first()
+        if queue_entry and queue_entry.doctor_code:
+            doctor_code = queue_entry.doctor_code
+            doctor_name = queue_entry.doctor_name
+        else:
+            logger.info('Доктор и его код не найден')
 
     formatted_doc_name_final = format_doctor_name(doctor_name)
 

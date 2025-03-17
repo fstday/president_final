@@ -41,9 +41,15 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
 
     global target_filial_id
     try:
-        # Находим пациента по его коду
         found_patient = Patient.objects.get(patient_code=patient_id)
-        print(f"✅ Найден пациент: {found_patient}")
+        # Ищем активную запись на прием
+        existing_appointment = Appointment.objects.filter(
+            patient=found_patient,
+            is_active=True,
+            is_infoclinica_id=True  # Если это запись из Infoclinica
+        ).first()
+        is_reschedule = existing_appointment is not None
+        schedid = existing_appointment.appointment_id if is_reschedule else None
 
         # Находим последнюю запись на прием для этого пациента
         latest_appointment = Appointment.objects.filter(

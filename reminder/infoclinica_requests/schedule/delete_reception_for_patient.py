@@ -45,10 +45,7 @@ def delete_reception_for_patient(patient_id):
     result_delete = 0
 
     try:
-        # Получаем пациента
         patient = Patient.objects.get(patient_code=patient_id)
-
-        # Получаем запись на прием для этого пациента
         appointment = Appointment.objects.filter(patient=patient, is_active=True).order_by('-start_time').first()
 
         if not appointment:
