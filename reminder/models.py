@@ -481,3 +481,76 @@ class AppointmentStatus(models.Model):
 
     def __str__(self):
         return f"{self.status_id}: {self.status_name}"
+
+# ====================================================
+#                 Assistant models
+# ====================================================
+
+
+class BatchTimeout(models.Model):
+    batch_timeout_seconds = models.IntegerField()
+
+
+class Thread(models.Model):
+    thread_id = models.CharField(max_length=120, unique=True, default=generate_uuid, editable=False)
+    order_key = models.CharField(max_length=120, unique=True, default=generate_uuid, editable=False)
+    assistant = models.ForeignKey(
+        'Assistant',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='threads'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(default=calculate_expiry)
+    current_run = models.ForeignKey('Run',
+                                    on_delete=models.SET_NULL,
+                                    null=True,
+                                    blank=True,
+                                    related_name='active_thread')
+
+    def __str__(self):
+        return f'Thread {self.thread_id}'
+
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+
+    def can_add_message(self):
+        """
+        Check if messages can be added to the thread
+        """
+        if not self.current_run:
+            return True
+        return self.current_run.status == Run.Status.COMPLETED
+
+
+class Run(models.Model):
+    class Status(models.TextChoices):
+        QUEUED = 'queued', _('Queued')
+        IN_PROGRESS = 'in_progress', _('In Progress')
+        REQUIRES_ACTION = 'requires_action', _('Requires Action')
+        COMPLETED = 'completed', _('Completed')
+        FAILED = 'failed', _('Failed')
+        CANCELLED = 'cancelled', _('Cancelled')
+        EXPIRED = 'expired', _('Expired')
+
+    run_id = models.CharField(max_length=255, unique=True, verbose_name=_('OpenAI Run ID'))
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.QUEUED,
+        verbose_name=_('Run Status')
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name=_('Creation Timestamp'))
+    run_expired_at = models.DateTimeField(null=True, blank=True, verbose_name=_('Run Expiration Timestamp'))
+
+
+class Assistant(models.Model):
+    assistant_id = models.CharField(max_length=255, unique=True)
+    name = models.CharField(max_length=255)
+    model = models.CharField(max_length=50, default="gpt-4-mini")
+    instructions = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'Assistant {self.assistant_id}\nName: {self.name}\nModel: {self.model}\nInstructions: {self.instructions}\nCreated at: {self.created_at}'
