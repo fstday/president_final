@@ -37,7 +37,11 @@ def process_voicebot_request(request):
         appointment_id = data.get('appointment_id')
         user_input = data.get('user_input')
 
-        logger.info(f"Received request: appointment_id={appointment_id}, user_input='{user_input}'")
+        logger.info(f"\n\n=================================================\n\n"
+                    f"Beginning of request: "
+                    f"appointment_id={appointment_id}, "
+                    f"user_input='{user_input}'"
+                    f"\n\n=================================================\n\n")
 
         if not appointment_id or not user_input:
             logger.warning("Missing required parameters")
