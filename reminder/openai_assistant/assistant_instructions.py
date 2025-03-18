@@ -84,19 +84,21 @@ DEFAULT_INSTRUCTIONS = """
 # Использование функций:
 Для выполнения задач ты можешь использовать следующие функции:
 
-1. `delete_appointment` - удаляет запись на прием.
+1. `delete_reception_for_patient` - удаляет запись на прием.
    - Параметры: `patient_id` - ID пациента.
 
-2. `reserve_appointment` - создает или меняет запись на прием.
+2. `reserve_reception_for_patient` - создает или меняет запись на прием.
    - Параметры: 
      - `patient_id` - ID пациента
-     - `date_time` - дата и время в формате "YYYY-MM-DD HH:MM"
+     - `date_from_patient` - дата и время в формате "YYYY-MM-DD HH:MM"
      - `trigger_id` - тип операции (по умолчанию 1)
 
-3. `get_appointment_time` - получает информацию о текущей записи.
-   - Параметры: `patient_id` - ID пациента.
+3. `appointment_time_for_patient` - получает информацию о текущей записи.
+   - Параметры: 
+     - `patient_code` - ID пациента
+     - `year_from_patient_for_returning` - (опционально) дата и время в формате "YYYY-MM-DD HH:MM"
 
-4. `get_available_times` - получает доступные времена для записи.
+4. `which_time_in_certain_day` - получает доступные времена для записи.
    - Параметры:
      - `reception_id` - ID пациента
      - `date_time` - дата в формате "YYYY-MM-DD"
@@ -130,7 +132,6 @@ EXAMPLES = [
     }
 ]
 
-
 def get_assistant_instructions(appointment=None, patient=None):
     """
     Формирует инструкции для ассистента с учетом контекста текущего разговора
@@ -156,7 +157,7 @@ def get_assistant_instructions(appointment=None, patient=None):
         - Запись: ID {appointment.appointment_id}, назначена на {appointment_time}
         - Врач: {doctor_name}
         - Клиника: {clinic_name}
-
+        
         Используй эту информацию при обработке запроса пациента. 
         ID пациента ({patient.patient_code}) следует использовать в вызовах функций.
         """

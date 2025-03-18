@@ -7,7 +7,7 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "delete_appointment",
+            "name": "delete_reception_for_patient",
             "description": "Удаляет запись на прием для конкретного пациента",
             "parameters": {
                 "type": "object",
@@ -24,7 +24,7 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "reserve_appointment",
+            "name": "reserve_reception_for_patient",
             "description": "Создает или изменяет запись на прием для пациента на определенную дату и время",
             "parameters": {
                 "type": "object",
@@ -33,7 +33,7 @@ TOOLS = [
                         "type": "string",
                         "description": "Идентификатор пациента (patient_code)"
                     },
-                    "date_time": {
+                    "date_from_patient": {
                         "type": "string",
                         "description": "Дата и время приема в формате YYYY-MM-DD HH:MM"
                     },
@@ -43,31 +43,35 @@ TOOLS = [
                         "enum": [1, 2, 3]
                     }
                 },
-                "required": ["patient_id", "date_time"]
+                "required": ["patient_id", "date_from_patient"]
             }
         }
     },
     {
         "type": "function",
         "function": {
-            "name": "get_appointment_time",
+            "name": "appointment_time_for_patient",
             "description": "Получает информацию о текущей записи пациента",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "patient_id": {
+                    "patient_code": {
                         "type": "string",
                         "description": "Идентификатор пациента (patient_code)"
+                    },
+                    "year_from_patient_for_returning": {
+                        "type": "string",
+                        "description": "Дата и время в формате YYYY-MM-DD HH:MM (опционально)"
                     }
                 },
-                "required": ["patient_id"]
+                "required": ["patient_code"]
             }
         }
     },
     {
         "type": "function",
         "function": {
-            "name": "get_available_times",
+            "name": "which_time_in_certain_day",
             "description": "Получает доступные времена для записи в определенный день",
             "parameters": {
                 "type": "object",

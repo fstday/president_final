@@ -179,21 +179,22 @@ class AssistantClient:
         from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
 
         try:
-            if function_name == "delete_appointment":
+            if function_name == "delete_reception_for_patient":
                 patient_id = function_args.get("patient_id")
                 return delete_reception_for_patient(patient_id)
 
-            elif function_name == "reserve_appointment":
+            elif function_name == "reserve_reception_for_patient":
                 patient_id = function_args.get("patient_id")
-                date_time = function_args.get("date_time")
+                date_from_patient = function_args.get("date_from_patient")
                 trigger_id = function_args.get("trigger_id", 1)
-                return reserve_reception_for_patient(patient_id, date_time, trigger_id)
+                return reserve_reception_for_patient(patient_id, date_from_patient, trigger_id)
 
-            elif function_name == "get_appointment_time":
-                patient_id = function_args.get("patient_id")
-                return appointment_time_for_patient(patient_id)
+            elif function_name == "appointment_time_for_patient":
+                patient_code = function_args.get("patient_code")
+                year_from_patient_for_returning = function_args.get("year_from_patient_for_returning")
+                return appointment_time_for_patient(patient_code, year_from_patient_for_returning)
 
-            elif function_name == "get_available_times":
+            elif function_name == "which_time_in_certain_day":
                 reception_id = function_args.get("reception_id")
                 date_time = function_args.get("date_time")
                 return which_time_in_certain_day(reception_id, date_time)

@@ -142,10 +142,10 @@ GET /api/assistants/info/
 
 ## Доступные функции для ассистента
 
-1. `delete_appointment` - удаляет запись на прием
-2. `reserve_appointment` - создает или меняет запись на прием
-3. `get_appointment_time` - получает информацию о текущей записи
-4. `get_available_times` - получает доступные времена для записи
+1. `delete_reception_for_patient` - удаляет запись на прием
+2. `reserve_reception_for_patient` - создает или меняет запись на прием
+3. `appointment_time_for_patient` - получает информацию о текущей записи
+4. `which_time_in_certain_day` - получает доступные времена для записи
 
 ## Дополнительная информация
 
