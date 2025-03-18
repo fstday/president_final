@@ -164,6 +164,3 @@ def delete_reception_for_patient(patient_id):
     except Exception as e:
         logger.error(f"Error deleting appointment: {str(e)}")
         return {"status": "error", "message": f"Error: {str(e)}"}
-
-
-delete_reception_for_patient('990000612')

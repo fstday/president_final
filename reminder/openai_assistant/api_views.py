@@ -177,54 +177,104 @@ def process_voicebot_request(request):
         }, status=500)
 
 
-@csrf_exempt
-@require_http_methods(["POST"])
-def create_assistant(request):
+def create_assistant_with_tools(client, name: str, instructions: str, model: str = "gpt-4"):
     """
-    Создает или обновляет ассистента в OpenAI и сохраняет его в БД
+    Создает или обновляет ассистента с инструментами (tools).
     """
-    try:
-        data = json.loads(request.body)
-        name = data.get('name', 'Медицинский ассистент')
-        instructions = data.get('instructions', '')
-        model = data.get('model', 'gpt-4-mini')
-
-        from openai import OpenAI
-        from reminder.openai_assistant.assistant_tools import create_assistant_with_tools
-
-        client = OpenAI(api_key=settings.OPEN_AI_API_KEY)
-
-        # Создаем ассистента в OpenAI
-        assistant_info = create_assistant_with_tools(
-            client=client,
-            name=name,
-            instructions=instructions,
-            model=model
-        )
-
-        # Сохраняем или обновляем ассистента в БД
-        assistant, created = Assistant.objects.update_or_create(
-            assistant_id=assistant_info.id,
-            defaults={
-                'name': name,
-                'model': model,
-                'instructions': instructions
+    TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "which_time_in_certain_day",
+                "description": "Получение доступного времени на конкретный день",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reception_id": {"type": "string", "description": "ID приема"},
+                        "date_time": {"type": "string", "description": "Дата YYYY-MM-DD"}
+                    },
+                    "required": ["reception_id", "date_time"]
+                }
             }
-        )
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "appointment_time_for_patient",
+                "description": "Получение текущей записи пациента",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "patient_code": {"type": "string", "description": "Код пациента"}
+                    },
+                    "required": ["patient_code"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "reserve_reception_for_patient",
+                "description": "Запись или перенос приема",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "patient_id": {"type": "string", "description": "ID пациента"},
+                        "date_from_patient": {"type": "string", "description": "Дата приема YYYY-MM-DD HH:MM"},
+                        "trigger_id": {"type": "integer", "description": "1 - запись, 2 - перенос"}
+                    },
+                    "required": ["patient_id", "date_from_patient", "trigger_id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_reception_for_patient",
+                "description": "Отмена записи пациента",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "patient_id": {"type": "string", "description": "ID пациента"}
+                    },
+                    "required": ["patient_id"]
+                }
+            }
+        }
+    ]
 
-        return JsonResponse({
-            'status': 'success',
-            'message': f"Ассистент {'создан' if created else 'обновлен'} успешно",
-            'assistant_id': assistant.assistant_id,
-            'name': assistant.name
-        })
+    try:
+        assistants = client.beta.assistants.list(limit=100)
+        existing_assistant = None
+
+        for assistant in assistants.data:
+            if assistant.name == name:
+                existing_assistant = assistant
+                break
+
+        if existing_assistant:
+            logger.info(f"🔄 Обновление ассистента {existing_assistant.id}...")
+            updated_assistant = client.beta.assistants.update(
+                assistant_id=existing_assistant.id,
+                name=name,
+                instructions=instructions,
+                model=model,
+                tools=TOOLS
+            )
+            return updated_assistant
+        else:
+            logger.info("🆕 Создание нового ассистента...")
+            new_assistant = client.beta.assistants.create(
+                name=name,
+                instructions=instructions,
+                model=model,
+                tools=TOOLS
+            )
+            return new_assistant
 
     except Exception as e:
-        logger.error(f"Error creating assistant: {e}", exc_info=True)
-        return JsonResponse({
-            'status': 'error',
-            'message': f'Ошибка создания ассистента: {str(e)}'
-        }, status=500)
+        logger.error(f"❌ Ошибка создания/обновления ассистента: {e}")
+        raise
 
 
 @csrf_exempt
