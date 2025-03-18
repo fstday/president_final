@@ -164,9 +164,10 @@ class AssistantClient:
                 run_id=run_id
             )
 
-            # If action required
+            # Если action required
             if run.status == "requires_action" and run.required_action:
                 tool_calls = run.required_action.submit_tool_outputs.tool_calls
+                logger.info(f"Function calls detected: {len(tool_calls)}")
 
                 tool_outputs = []
                 for tool_call in tool_calls:
@@ -192,11 +193,15 @@ class AssistantClient:
                         tool_outputs=tool_outputs
                     )
                     logger.info(f"Submitted {len(tool_outputs)} tool outputs for run {run_id}")
+                    return tool_outputs
+                else:
+                    logger.warning("No tool outputs to submit")
+                    return []
 
             return run.status
 
         except Exception as e:
-            logger.error(f"Error handling function calls: {e}")
+            logger.error(f"Error handling function calls: {e}", exc_info=True)
             raise
 
     def _call_function(self, function_name: str, function_args: dict) -> dict:
@@ -295,7 +300,8 @@ class AssistantClient:
                 # Handle function calls if needed
                 if run.status == "requires_action":
                     logger.info(f"Run {run_id} requires action")
-                    self.handle_function_calls(run_id, thread_id)
+                    result = self.handle_function_calls(run_id, thread_id)
+                    logger.info(f"Function call result: {result}")
 
                 # Update status in DB
                 run_model = RunModel.objects.filter(run_id=run_id).first()
