@@ -342,6 +342,6 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
 
 
 patient_code = '990000612'
-year_from_patient_for_returning = "2025-03-17 17:00"
+year_from_patient_for_returning = "2025-03-18 17:00"
 
-reserve_reception_for_patient(patient_code, year_from_patient_for_returning, trigger_id=1)
+reserve_reception_for_patient(patient_code, year_from_patient_for_returning, trigger_id=2)

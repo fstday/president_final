@@ -29,6 +29,7 @@ DEBUG = True
 
 ALLOWED_HOSTS = ['*']
 
+load_dotenv()  # загрузит переменные из .env файла
 
 # Настройки для Инфоклиники
 INFOCLINICA_BASE_URL = os.getenv('INFOCLINICA_BASE_URL', 'https://api.infoclinica.ru/api/xml')
@@ -38,7 +39,7 @@ INFOCLINICA_HOST = os.getenv('INFOCLINICA_HOST', 'demo.infoclinica.ru')
 INFOCLINICA_CERT = os.getenv('INFOCLINICA_CERT', '')
 INFOCLINICA_KEY = os.getenv('INFOCLINICA_KEY', '')
 
-OPEN_AI_API_KEY = os.getenv('OPEN_AI_API_KEY')
+OPENAI_API_KEY = os.getenv('OPEN_AI_API_KEY')
 
 # Application definition
 

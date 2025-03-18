@@ -501,13 +501,15 @@ class Thread(models.Model):
         blank=True,
         related_name='threads'
     )
+    # Добавьте это поле
+    appointment_id = models.BigIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(default=calculate_expiry)
     current_run = models.ForeignKey('Run',
-                                    on_delete=models.SET_NULL,
-                                    null=True,
-                                    blank=True,
-                                    related_name='active_thread')
+                                   on_delete=models.SET_NULL,
+                                   null=True,
+                                   blank=True,
+                                   related_name='active_thread')
 
     def __str__(self):
         return f'Thread {self.thread_id}'

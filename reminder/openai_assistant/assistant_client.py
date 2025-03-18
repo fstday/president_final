@@ -3,69 +3,70 @@ import json
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Union
-
+from django.utils import timezone
 from django.conf import settings
 from openai import OpenAI
-from openai.types.beta.threads import Run
 
-from reminder.models import Assistant, Thread, Run as RunModel, Patient, Appointment
+from reminder.models import Assistant, Thread, Run as RunModel, Patient, Appointment, QueueInfo
 
 logger = logging.getLogger(__name__)
 
 
 class AssistantClient:
     """
-    Клиент для работы с OpenAI Assistant API.
-    Обеспечивает взаимодействие между пациентами и системой записи на прием.
+    Client for working with OpenAI Assistant API.
+    Provides interaction between patients and the appointment system.
     """
 
     def __init__(self):
-        self.client = OpenAI(api_key=settings.OPEN_AI_API_KEY)
+        self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
     def get_or_create_thread(self, appointment_id: int) -> Thread:
         """
-        Получает существующий или создает новый поток для диалога с пациентом
+        Gets existing thread or creates a new one for patient dialogue
         """
-        # Проверяем, есть ли уже тред для этой записи
         try:
+            # Check if appointment exists
             appointment = Appointment.objects.get(appointment_id=appointment_id)
+
+            # Find an active thread for this appointment
             thread = Thread.objects.filter(
-                appointment_id=appointment_id,
-                is_expired=False
+                order_key=str(appointment_id),
+                expires_at__gt=timezone.now()
             ).first()
 
             if thread:
-                # Проверяем, не истек ли тред
-                if thread.is_expired():
-                    # Создаем новый тред
-                    openai_thread = self.client.beta.threads.create()
-                    thread.thread_id = openai_thread.id
-                    thread.expires_at = datetime.now() + timedelta(hours=24)
-                    thread.save()
+                logger.info(f"Found existing thread {thread.thread_id} for appointment {appointment_id}")
                 return thread
 
-            # Если треда нет, создаем новый
-            assistant = Assistant.objects.first()  # Берем первого ассистента из БД
+            # If no active thread exists, create a new one
+            assistant = Assistant.objects.first()  # Get first assistant from DB
             if not assistant:
-                raise ValueError("Assistants not found in database")
+                logger.error("No assistants found in database")
+                raise ValueError("No assistants found in database")
 
+            # Create thread in OpenAI
             openai_thread = self.client.beta.threads.create()
+
+            # Save thread in local database
             thread = Thread.objects.create(
                 thread_id=openai_thread.id,
-                assistant=assistant,
-                appointment_id=appointment_id
+                order_key=str(appointment_id),
+                assistant=assistant
             )
+            logger.info(f"Created new thread {thread.thread_id} for appointment {appointment_id}")
             return thread
 
         except Appointment.DoesNotExist:
+            logger.error(f"Appointment with ID {appointment_id} not found")
             raise ValueError(f"Appointment with ID {appointment_id} not found")
         except Exception as e:
-            logger.error(f"Error creating thread: {e}")
+            logger.error(f"Error creating/finding thread: {e}")
             raise
 
     def add_message_to_thread(self, thread_id: str, content: str, role: str = "user") -> dict:
         """
-        Добавляет сообщение в тред
+        Adds a message to the thread
         """
         try:
             message = self.client.beta.threads.messages.create(
@@ -73,6 +74,7 @@ class AssistantClient:
                 role=role,
                 content=content
             )
+            logger.info(f"Added {role} message to thread {thread_id}")
             return message
         except Exception as e:
             logger.error(f"Error adding message to thread: {e}")
@@ -80,56 +82,81 @@ class AssistantClient:
 
     def run_assistant(self, thread: Thread, appointment: Appointment) -> RunModel:
         """
-        Запускает ассистента для обработки сообщений в треде
+        Runs assistant to process messages in the thread
         """
         try:
-            # Получаем данные о пациенте и записи для контекста
+            # Get patient and appointment data for context
             patient = appointment.patient
+            patient_code = patient.patient_code
 
-            # Собираем информацию о записи для контекста
-            context = {
-                "appointment_id": appointment.appointment_id,
-                "patient_name": patient.full_name,
-                "patient_code": patient.patient_code,
-                "appointment_time": appointment.start_time.strftime("%Y-%m-%d %H:%M"),
-                "doctor_name": appointment.doctor.full_name if appointment.doctor else "Не указан",
-                "clinic_name": appointment.clinic.name if appointment.clinic else "Не указана"
-            }
+            # Format the appointment time
+            appointment_time_str = "Не указано"
+            if appointment.start_time:
+                appointment_time_str = appointment.start_time.strftime("%Y-%m-%d %H:%M")
 
-            # Создаем запуск ассистента с дополнительными инструкциями на основе контекста
+            # Get the doctor's name
+            doctor_name = "Не указан"
+            if appointment.doctor:
+                doctor_name = appointment.doctor.full_name
+
+            # Get the clinic name
+            clinic_name = "Не указана"
+            if appointment.clinic:
+                clinic_name = appointment.clinic.name
+
+            # Create context instructions
+            context_instructions = f"""
+            ВАЖНО: Всегда используйте функции вместо текстовых ответов в следующих случаях:
+
+            1. Когда пользователь спрашивает о свободных окошках или времени (пример: "Какие свободные окошки на сегодня") - 
+               ВСЕГДА вызывайте функцию which_time_in_certain_day с параметрами reception_id и date_time
+
+            2. Когда пользователь интересуется своей текущей записью - 
+               ВСЕГДА вызывайте функцию appointment_time_for_patient с параметром patient_code
+
+            3. Когда пользователь хочет записаться или перенести запись - 
+               ВСЕГДА вызывайте функцию reserve_reception_for_patient
+
+            4. Когда пользователь хочет отменить запись - 
+               ВСЕГДА вызывайте функцию delete_reception_for_patient
+
+            НИКОГДА не отвечайте текстом в этих ситуациях. Вместо этого ВСЕГДА вызывайте соответствующую функцию.
+
+                Контекст текущего разговора:
+                Пациент: {patient.full_name} (ID: {patient_code})
+                Запись: {appointment.appointment_id} на {appointment_time_str}
+                Врач: {doctor_name}
+                Клиника: {clinic_name}  
+
+                Используйте эту информацию при обработке запроса пользователя.
+            """
+
+            # Create an assistant run with additional context
             openai_run = self.client.beta.threads.runs.create(
                 thread_id=thread.thread_id,
                 assistant_id=thread.assistant.assistant_id,
-                instructions=f"""
-                Контекст текущего разговора:
-                Пациент: {context['patient_name']} (ID: {context['patient_code']})
-                Запись: {context['appointment_id']} на {context['appointment_time']}
-                Врач: {context['doctor_name']}
-                Клиника: {context['clinic_name']}
-
-                Используйте эту информацию при обработке запроса пользователя.
-                """
+                instructions=context_instructions
             )
 
-            # Сохраняем информацию о запуске в БД
+            # Save run information in DB
             run = RunModel.objects.create(
                 run_id=openai_run.id,
                 status=openai_run.status
             )
 
-            # Обновляем поток, связывая его с текущим запуском
+            # Update thread with current run
             thread.current_run = run
             thread.save()
 
+            logger.info(f"Started run {run.run_id} for thread {thread.thread_id}")
             return run
-
         except Exception as e:
-            logger.error(f"Error running assistant: {e}")
+            logger.error(f"Error running assistant: {e}", exc_info=True)
             raise
 
     def handle_function_calls(self, run_id: str, thread_id: str):
         """
-        Обрабатывает вызовы функций от ассистента
+        Handles function calls from the assistant
         """
         try:
             run = self.client.beta.threads.runs.retrieve(
@@ -137,7 +164,7 @@ class AssistantClient:
                 run_id=run_id
             )
 
-            # Если требуется действие
+            # If action required
             if run.status == "requires_action" and run.required_action:
                 tool_calls = run.required_action.submit_tool_outputs.tool_calls
 
@@ -146,21 +173,25 @@ class AssistantClient:
                     function_name = tool_call.function.name
                     function_args = json.loads(tool_call.function.arguments)
 
-                    # Получаем результат вызова функции
+                    logger.info(f"Function call detected: {function_name} with args: {function_args}")
+
+                    # Get result of function call
                     result = self._call_function(function_name, function_args)
+                    logger.info(f"Function result: {result}")
 
                     tool_outputs.append({
                         "tool_call_id": tool_call.id,
                         "output": json.dumps(result)
                     })
 
-                # Отправляем результаты вызова функций
+                # Submit function call results
                 if tool_outputs:
                     self.client.beta.threads.runs.submit_tool_outputs(
                         thread_id=thread_id,
                         run_id=run_id,
                         tool_outputs=tool_outputs
                     )
+                    logger.info(f"Submitted {len(tool_outputs)} tool outputs for run {run_id}")
 
             return run.status
 
@@ -170,52 +201,74 @@ class AssistantClient:
 
     def _call_function(self, function_name: str, function_args: dict) -> dict:
         """
-        Вызывает соответствующую функцию на основе имени
+        Calls the appropriate function based on name
         """
-        # Импортируем функции только при необходимости вызова
+        # Import functions only when needed
         from reminder.infoclinica_requests.schedule.delete_reception_for_patient import delete_reception_for_patient
         from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import reserve_reception_for_patient
         from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
         from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
+        from datetime import datetime
 
         try:
+            logger.info(f"Calling function {function_name} with args: {function_args}")
+
             if function_name == "delete_reception_for_patient":
                 patient_id = function_args.get("patient_id")
+                logger.info(f"Deleting reception for patient {patient_id}")
                 return delete_reception_for_patient(patient_id)
 
             elif function_name == "reserve_reception_for_patient":
                 patient_id = function_args.get("patient_id")
                 date_from_patient = function_args.get("date_from_patient")
                 trigger_id = function_args.get("trigger_id", 1)
+                logger.info(
+                    f"Reserving reception for patient {patient_id} at {date_from_patient} with trigger {trigger_id}")
                 return reserve_reception_for_patient(patient_id, date_from_patient, trigger_id)
 
             elif function_name == "appointment_time_for_patient":
                 patient_code = function_args.get("patient_code")
                 year_from_patient_for_returning = function_args.get("year_from_patient_for_returning")
+                logger.info(f"Getting appointment time for patient {patient_code}")
                 return appointment_time_for_patient(patient_code, year_from_patient_for_returning)
 
             elif function_name == "which_time_in_certain_day":
                 reception_id = function_args.get("reception_id")
                 date_time = function_args.get("date_time")
-                return which_time_in_certain_day(reception_id, date_time)
+
+                # Handle special cases like "today" or "tomorrow"
+                if date_time == "today":
+                    date_time = datetime.now().strftime("%Y-%m-%d")
+                elif date_time == "tomorrow":
+                    date_time = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+                logger.info(f"Getting available times for patient {reception_id} on {date_time}")
+                result = which_time_in_certain_day(reception_id, date_time)
+
+                # Convert JsonResponse to dict if needed
+                if hasattr(result, 'content'):
+                    return json.loads(result.content.decode('utf-8'))
+                return result
 
             else:
                 logger.warning(f"Unknown function: {function_name}")
                 return {"status": "error", "message": f"Unknown function: {function_name}"}
 
         except Exception as e:
-            logger.error(f"Error calling function {function_name}: {e}")
+            logger.error(f"Error calling function {function_name}: {e}", exc_info=True)
             return {"status": "error", "message": str(e)}
 
     def get_messages(self, thread_id: str, limit: int = 10) -> List[dict]:
         """
-        Получает список сообщений из треда
+        Gets messages from thread
         """
         try:
             messages = self.client.beta.threads.messages.list(
                 thread_id=thread_id,
-                limit=limit
+                limit=limit,
+                order="desc"  # Get newest messages first
             )
+            logger.info(f"Retrieved {len(messages.data)} messages from thread {thread_id}")
             return messages.data
         except Exception as e:
             logger.error(f"Error getting messages: {e}")
@@ -223,44 +276,62 @@ class AssistantClient:
 
     def wait_for_run_completion(self, thread_id: str, run_id: str, timeout: int = 60) -> str:
         """
-        Ожидает завершения запуска ассистента с периодической проверкой статуса
+        Waits for assistant run to complete with periodic status checks
         """
         import time
 
         start_time = time.time()
+        poll_interval = 1.0  # Start with 1 second polling
+
+        logger.info(f"Waiting for run {run_id} to complete (timeout: {timeout}s)")
+
         while time.time() - start_time < timeout:
-            run = self.client.beta.threads.runs.retrieve(
+            try:
+                run = self.client.beta.threads.runs.retrieve(
+                    thread_id=thread_id,
+                    run_id=run_id
+                )
+
+                # Handle function calls if needed
+                if run.status == "requires_action":
+                    logger.info(f"Run {run_id} requires action")
+                    self.handle_function_calls(run_id, thread_id)
+
+                # Update status in DB
+                run_model = RunModel.objects.filter(run_id=run_id).first()
+                if run_model and run_model.status != run.status:
+                    run_model.status = run.status
+                    run_model.save()
+                    logger.info(f"Updated run status to {run.status}")
+
+                # Check if run is complete
+                if run.status in ["completed", "failed", "cancelled", "expired"]:
+                    logger.info(f"Run {run_id} finished with status: {run.status}")
+                    return run.status
+
+                # Use exponential backoff for polling (up to 5 seconds)
+                poll_interval = min(5.0, poll_interval * 1.5)
+                time.sleep(poll_interval)
+
+            except Exception as e:
+                logger.error(f"Error checking run status: {e}")
+                time.sleep(poll_interval)
+
+        # If timeout, cancel the run
+        logger.warning(f"Run {run_id} timed out after {timeout}s, cancelling")
+        try:
+            self.client.beta.threads.runs.cancel(
                 thread_id=thread_id,
                 run_id=run_id
             )
 
-            # Обрабатываем вызовы функций при необходимости
-            if run.status == "requires_action":
-                self.handle_function_calls(run_id, thread_id)
-
-            # Обновляем статус в БД
+            # Update status in DB
             run_model = RunModel.objects.filter(run_id=run_id).first()
             if run_model:
-                run_model.status = run.status
+                run_model.status = "cancelled"
                 run_model.save()
 
-            # Проверяем, завершен ли запуск
-            if run.status in ["completed", "failed", "cancelled", "expired"]:
-                return run.status
-
-            # Ждем перед следующим запросом
-            time.sleep(1)
-
-        # Если истекло время, отменяем запуск
-        self.client.beta.threads.runs.cancel(
-            thread_id=thread_id,
-            run_id=run_id
-        )
-
-        # Обновляем статус в БД
-        run_model = RunModel.objects.filter(run_id=run_id).first()
-        if run_model:
-            run_model.status = "cancelled"
-            run_model.save()
+        except Exception as e:
+            logger.error(f"Error cancelling run: {e}")
 
         return "cancelled"

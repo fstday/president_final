@@ -165,3 +165,19 @@ def get_assistant_instructions(appointment=None, patient=None):
         instructions += context_info
 
     return instructions
+
+
+# Добавьте в assistant_instructions.py
+EXAMPLES_FOR_TOOLS = """
+# Примеры запросов и соответствующих функций:
+
+1. "Какие свободные окошки на сегодня" → which_time_in_certain_day(reception_id=ID_пациента, date_time="текущая_дата")
+
+2. "Когда у меня запись" → appointment_time_for_patient(patient_code=ID_пациента)
+
+3. "Хочу записаться на завтра в 15:00" → reserve_reception_for_patient(patient_id=ID_пациента, date_from_patient="завтрашняя_дата 15:00")
+
+4. "Отмените мою запись" → delete_reception_for_patient(patient_id=ID_пациента)
+
+Важно: Всегда вызывайте соответствующую функцию вместо ответа текстом, когда пользователь запрашивает информацию о записях, времени или хочет выполнить действие с записью.
+"""

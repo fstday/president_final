@@ -110,4 +110,4 @@ def which_time_in_certain_day(reception_id, date_time):
     return JsonResponse(response)
 
 if __name__ == '__main__':
-    which_time_in_certain_day(reception_id=990000612, date_time="2025-03-15")
+    which_time_in_certain_day(reception_id=990000612, date_time="2025-03-18")
