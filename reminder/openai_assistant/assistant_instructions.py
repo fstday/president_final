@@ -285,28 +285,18 @@ jsonCopy{
 }
 ```
 
-# Использование функций:
-Для выполнения задач ты можешь использовать следующие функции:
+### Обязательное использование функций
+1. Свободные окошки → which_time_in_certain_day(patient_code, date_time)
+2. Текущая запись → appointment_time_for_patient(patient_code)
+3. Запись/Перенос → reserve_reception_for_patient(patient_id, date_from_patient, trigger_id)
+4. Отмена записи → delete_reception_for_patient(patient_id)
 
-1. `delete_reception_for_patient` - удаляет запись на прием.
-   - Параметры: `patient_id` - ID пациента.
+# Также обновите примеры запросов:
 
-2. `reserve_reception_for_patient` - создает или меняет запись на прием.
-   - Параметры: 
-     - `patient_id` - ID пациента
-     - `date_from_patient` - дата и время в формате "YYYY-MM-DD HH:MM"
-     - `trigger_id` - тип операции (по умолчанию 1)
-
-3. `appointment_time_for_patient` - получает информацию о текущей записи.
-   - Параметры: 
-     - `patient_code` - ID пациента
-     - `year_from_patient_for_returning` - (опционально) дата и время в формате "YYYY-MM-DD HH:MM"
-
-4. `which_time_in_certain_day` - получает доступные времена для записи.
-   - Параметры:
-     - `reception_id` - ID пациента
-     - `date_time` - дата в формате "YYYY-MM-DD"
-
+### Запросы на проверку свободного времени (which_time_in_certain_day):
+- "Какие есть свободные окна на четверг?" → which_time_in_certain_day(patient_code=ID_пациента, date_time="2025-03-20")
+- "Какие свободные окошки на сегодня?" → which_time_in_certain_day(patient_code=ID_пациента, date_time="today") 
+- "Можно узнать какое время доступно на завтра?" → which_time_in_certain_day(patient_code=ID_пациента, date_time="tomorrow")
 # Важно:
 Всегда возвращай ответ в согласованном с документацией формате. Никогда не изменяй структуру ответа. 
 В случае ошибки всегда указывай статус ошибки и понятное сообщение.

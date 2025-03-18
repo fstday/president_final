@@ -10,12 +10,12 @@ from reminder.models import *
 from reminder.infoclinica_requests.utils import format_doctor_name, format_russian_date
 
 
-def which_time_in_certain_day(reception_id, date_time):
+def which_time_in_certain_day(patient_code, date_time):
     """
     Обработка запроса для получения доступных интервалов на определенный день.
     """
     global doctor_name
-    logger.info("Я в функции which_time_in_certain_day")
+    logger.info(f"Я в функции which_time_in_certain_day\nПришедшие данные: \npatient_code: {patient_code}\ndate_time: {date_time}")
 
     if len(date_time) == 10:
         date_time += " 00:00"
@@ -25,7 +25,8 @@ def which_time_in_certain_day(reception_id, date_time):
     except ValueError as e:
         return JsonResponse({'status': 'error', 'message': f'Ошибка преобразования даты: {e}'}, status=400)
 
-    patient = Patient.objects.get(patient_code=reception_id)
+    patient = Patient.objects.get(patient_code=patient_code)
+
     appointment = Appointment.objects.filter(patient=patient, is_active=True).first()
     if appointment and appointment.doctor:
         doctor_code = appointment.doctor.doctor_code

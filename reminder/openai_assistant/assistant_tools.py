@@ -76,7 +76,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "reception_id": {
+                    "patient_code": {
                         "type": "string",
                         "description": "Patient identifier code (patient_code)"
                     },
@@ -85,7 +85,7 @@ TOOLS = [
                         "description": "Date in YYYY-MM-DD format to check for available times, or 'today' for current day"
                     }
                 },
-                "required": ["reception_id", "date_time"]
+                "required": ["patient_code", "date_time"]
             }
         }
     }

@@ -104,6 +104,9 @@ class AssistantClient:
             if appointment.clinic:
                 clinic_name = appointment.clinic.name
 
+            current_date = datetime.now().strftime("%Y-%m-%d")
+            tomorrow_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+
             # Create context instructions
             context_instructions = f"""
             # МЕДИЦИНСКИЙ АССИСТЕНТ ДЛЯ УПРАВЛЕНИЯ ЗАПИСЯМИ НА ПРИЕМ
@@ -217,7 +220,14 @@ class AssistantClient:
             - Текущая запись: {appointment.appointment_id} на {appointment_time_str}
             - Врач: {doctor_name}
             - Клиника: {clinic_name}
+            
+            ## ОБРАБОТКА ДАТ И ВРЕМЕНИ
+            - Сегодняшняя дата: {current_date}
+            - Завтрашняя дата: {tomorrow_date}
+            - Когда пользователь говорит "сегодня", используй дату {current_date}
+            - Когда пользователь говорит "завтра", используй дату {tomorrow_date}
 
+            
             ## ФИНАЛЬНЫЕ ИНСТРУКЦИИ
             ✔️ ВСЕГДА использовать функции вместо текстовых ответов
             ✔️ Точно определять намерение пользователя
@@ -339,21 +349,57 @@ class AssistantClient:
                 return appointment_time_for_patient(patient_code, year_from_patient_for_returning)
 
             elif function_name == "which_time_in_certain_day":
-                reception_id = function_args.get("reception_id")
+
+                patient_code = function_args.get("patient_code")
+
                 date_time = function_args.get("date_time")
 
                 # Handle special cases like "today" or "tomorrow"
-                if date_time == "today":
+
+                if date_time.lower() == "today" or date_time.lower() == "сегодня":
+
+                    # Важно: всегда берем текущую дату из системы, а не из контекста
+
                     date_time = datetime.now().strftime("%Y-%m-%d")
-                elif date_time == "tomorrow":
+
+                    logger.info(f"'Сегодня' интерпретировано как {date_time}")
+
+                elif date_time.lower() == "tomorrow" or date_time.lower() == "завтра":
+
                     date_time = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-                logger.info(f"Getting available times for patient {reception_id} on {date_time}")
-                result = which_time_in_certain_day(reception_id, date_time)
+                    logger.info(f"'Завтра' интерпретировано как {date_time}")
+
+                # Дополнительная проверка на устаревшие даты
+
+                try:
+
+                    requested_date = datetime.strptime(date_time, "%Y-%m-%d").date()
+
+                    current_date = datetime.now().date()
+
+                    if requested_date < current_date:
+                        logger.warning(f"Запрошена дата в прошлом: {date_time}, заменяем на сегодня")
+
+                        date_time = current_date.strftime("%Y-%m-%d")
+
+                except (ValueError, TypeError):
+
+                    # Если ошибка парсинга даты, используем сегодняшнюю дату
+
+                    logger.warning(f"Ошибка парсинга даты '{date_time}', используем сегодняшнюю")
+
+                    date_time = datetime.now().strftime("%Y-%m-%d")
+
+                logger.info(f"Getting available times for patient {patient_code} on {date_time}")
+
+                result = which_time_in_certain_day(patient_code, date_time)
 
                 # Convert JsonResponse to dict if needed
+
                 if hasattr(result, 'content'):
                     return json.loads(result.content.decode('utf-8'))
+
                 return result
 
             else:
