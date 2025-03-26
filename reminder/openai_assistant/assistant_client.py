@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import logging
 from datetime import datetime, timedelta
@@ -389,15 +390,27 @@ class AssistantClient:
         """
         Enhanced function to properly handle appointment scheduling according to the required algorithm
         """
-        # Import functions only when needed
+        # Import functions
         from reminder.infoclinica_requests.schedule.delete_reception_for_patient import delete_reception_for_patient
         from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import reserve_reception_for_patient
         from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
         from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
-        from datetime import datetime
+        from datetime import datetime, timedelta
 
         try:
             logger.info(f"Calling function {function_name} with args: {function_args}")
+
+            # Process relative date references
+            if function_name == "reserve_reception_for_patient":
+                date_from_patient = function_args.get("date_from_patient", "")
+                patient_id = function_args.get("patient_id")
+
+                # Handle relative date references
+                if isinstance(date_from_patient, str) and "через" in date_from_patient.lower():
+                    # Parse "через неделю", "через 3 дня", etc.
+                    relative_date = self._parse_relative_date(date_from_patient)
+                    if relative_date:
+                        function_args["date_from_patient"] = relative_date
 
             # CASE 1: Delete appointment
             if function_name == "delete_reception_for_patient":
@@ -411,8 +424,20 @@ class AssistantClient:
                 date_from_patient = function_args.get("date_from_patient")
                 trigger_id = function_args.get("trigger_id", 1)
 
-                # Process date and time as before...
-                # [existing date/time processing code]
+                # Handle time-of-day references
+                if isinstance(date_from_patient, str) and not re.search(r'\d{1,2}:\d{2}', date_from_patient):
+                    # Check for time of day references
+                    date_part = date_from_patient.split()[0] if ' ' in date_from_patient else date_from_patient
+                    time_of_day = self._extract_time_of_day(date_from_patient.lower())
+                    if time_of_day:
+                        # Map time of day to specific hour
+                        if "утр" in time_of_day:
+                            date_from_patient = f"{date_part} 10:30"
+                        elif "обед" in time_of_day:
+                            date_from_patient = f"{date_part} 13:30"
+                        elif "вечер" in time_of_day or "ужин" in time_of_day:
+                            date_from_patient = f"{date_part} 18:30"
+                        function_args["date_from_patient"] = date_from_patient
 
                 return reserve_reception_for_patient(patient_id, date_from_patient, trigger_id)
 
@@ -423,59 +448,99 @@ class AssistantClient:
                 logger.info(f"Getting appointment time for patient {patient_code}")
                 return appointment_time_for_patient(patient_code, year_from_patient_for_returning)
 
-            # CASE 4: Check available times - CRITICAL IMPROVEMENT HERE
             elif function_name == "which_time_in_certain_day":
                 patient_code = function_args.get("patient_code")
                 date_time = function_args.get("date_time")
 
-                # Handle special cases (today/tomorrow) as before...
-                # [existing date processing code]
+                # Стандартная обработка даты...
 
                 logger.info(f"Getting available times for patient {patient_code} on {date_time}")
                 available_times_result = which_time_in_certain_day(patient_code, date_time)
 
-                # Convert JsonResponse to dict if needed
+                # Преобразуем JsonResponse в словарь при необходимости
                 if hasattr(available_times_result, 'content'):
                     available_times_result = json.loads(available_times_result.content.decode('utf-8'))
 
-                # Check if this is a simple scheduling request (no time specified) that requires automatic scheduling
-                if isinstance(available_times_result, dict) and "all_available_times" in available_times_result:
-                    # This is a simple scheduling request where we need to automatically select the earliest time
-                    available_times = available_times_result.get("all_available_times", [])
+                # Логирование для отладки
+                logger.info(f"Available times result structure: {available_times_result}")
 
+                # Получаем текст запроса пользователя
+                user_request = self._get_last_user_message(thread_id)
+                logger.info(f"User request: {user_request}")
+
+                # ОЧЕНЬ ВАЖНО: Проверяем, содержит ли запрос ключевые слова для записи
+                # Расширяем список ключевых слов
+                scheduling_keywords = [
+                    "запиши", "запишите", "записать", "записаться",
+                    "назначь", "назначьте", "оформи", "оформите",
+                    "хочу на", "хочу записаться", "хочу запись",
+                    "сделай", "сделайте", "забронируй", "бронь"
+                ]
+                is_scheduling_request = any(keyword in user_request.lower() for keyword in scheduling_keywords)
+                logger.info(f"Is scheduling request: {is_scheduling_request}")
+
+                # КРИТИЧЕСКОЕ УСЛОВИЕ: Если запрос на запись - мы ВСЕГДА должны завершить процесс записи
+                if is_scheduling_request:
+                    # Извлекаем список доступных времен, вне зависимости от структуры ответа
+                    available_times = []
+
+                    # Проверяем все возможные форматы ответа
+                    if isinstance(available_times_result, dict):
+                        # Вариант 1: all_available_times
+                        if "all_available_times" in available_times_result:
+                            available_times = available_times_result.get("all_available_times", [])
+
+                        # Вариант 2: time_1, time_2, time_3
+                        elif any(f"time_{i}" in available_times_result for i in range(1, 4)):
+                            times = []
+                            for i in range(1, 10):  # До 10 возможных времен
+                                time_key = f"time_{i}"
+                                if time_key in available_times_result and available_times_result[time_key]:
+                                    times.append(available_times_result[time_key])
+                            available_times = times
+
+                    logger.info(f"Extracted available times: {available_times}")
+
+                    # Если нашли доступные времена - ОБЯЗАТЕЛЬНО выбираем одно и записываем
                     if available_times:
-                        # Получаем оригинальный запрос пользователя из последнего сообщения
-                        user_request = self._get_last_user_message(thread_id)
+                        # По умолчанию выбираем первое доступное время
+                        selected_time = available_times[0]
 
-                        # Используем новый метод для выбора времени с учетом времени суток
-                        selected_time, error_message = self.handle_time_selection(available_times, user_request)
-
-                        if selected_time:
-                            # Format the date for reserve_reception_for_patient
-                            date_str = date_time
-                            if date_time.lower() == "today" or date_time.lower() == "сегодня":
-                                date_str = datetime.now().strftime("%Y-%m-%d")
-                            elif date_time.lower() == "tomorrow" or date_time.lower() == "завтра":
-                                date_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-
-                            # Call reserve_reception_for_patient with the selected time
-                            formatted_datetime = f"{date_str} {selected_time}"
-                            logger.info(f"Scheduling appointment based on request {user_request}: {formatted_datetime}")
-
-                            # Make the reservation
-                            reservation_result = reserve_reception_for_patient(
-                                patient_id=patient_code,
-                                date_from_patient=formatted_datetime,
-                                trigger_id=1
+                        try:
+                            # Пытаемся использовать продвинутую логику выбора
+                            selected_time_complex, error_message = self.handle_time_selection(
+                                available_times,
+                                user_request,
+                                patient_code
                             )
 
-                            # Return the reservation result instead of available times
-                            return reservation_result
-                        elif error_message:
-                            # Если нет подходящего времени в запрошенный период
-                            return {"status": "error", "message": error_message}
+                            if selected_time_complex:
+                                selected_time = selected_time_complex
+                        except Exception as e:
+                            logger.error(f"Error in handle_time_selection: {e}, falling back to first available time")
 
-                # If not a simple scheduling request or no times available, return the available times
+                        # Форматируем время для записи
+                        formatted_datetime = selected_time
+                        # Если время без даты - добавляем дату
+                        if ' ' not in selected_time and ':' in selected_time:
+                            formatted_datetime = f"{date_time} {selected_time}"
+
+                        logger.info(f"Auto-scheduling appointment: {formatted_datetime}")
+
+                        # КЛЮЧЕВОЙ ШАГ: Выполняем запись
+                        reservation_result = reserve_reception_for_patient(
+                            patient_id=patient_code,
+                            date_from_patient=formatted_datetime,
+                            trigger_id=1
+                        )
+
+                        # Возвращаем результат записи
+                        return reservation_result
+                    else:
+                        # Если почему-то не нашли доступных времен
+                        logger.warning("No available times found but this is a scheduling request")
+
+                # Если это не запрос на запись или не удалось выбрать время - возвращаем обычный результат
                 return available_times_result
 
             else:
@@ -567,89 +632,73 @@ class AssistantClient:
 
     def handle_time_selection(self, available_times, user_request, patient_code):
         """
-        Улучшенный метод для выбора времени записи на основе запроса пользователя.
-        Учитывает указание времени суток в запросе пользователя.
+        Улучшенный метод для выбора времени записи из доступных вариантов.
         """
-        # Проверяем, содержит ли запрос указание на время суток
+        logger.info(f"Running handle_time_selection with {len(available_times)} times")
+
+        # Если времен нет - сразу выходим
+        if not available_times:
+            return None, "Нет доступных времен"
+
+        # Предпочтения по времени суток
         request_lower = user_request.lower()
 
-        # Определяем временные интервалы
-        morning_keywords = ["утр", "утром", "с утра", "на утро", "рано", "раннее", "поран"]
+        morning_keywords = ["утр", "утром", "с утра", "на утро", "рано", "раннее"]
         lunch_keywords = ["обед", "днем", "дневн", "полдень", "днём", "в обед", "на обед"]
         evening_keywords = ["вечер", "ужин", "вечером", "на ужин", "к ужину", "поздн", "попозже"]
 
-        # Если нет доступных времен, возвращаем сообщение об ошибке
-        if not available_times:
-            return None, "Нет доступных времен на указанную дату"
+        # Простая эвристика - если ничего не указано - берем самое раннее время
+        # Это соответствует главному правилу из промпта
+        if not any(keyword in request_lower for keyword in morning_keywords + lunch_keywords + evening_keywords):
+            logger.info(f"No time of day specified, selecting earliest time: {available_times[0]}")
+            return available_times[0], None
 
-        # Проверяем наличие указания времени суток в запросе
-        is_morning_request = any(keyword in request_lower for keyword in morning_keywords)
-        is_lunch_request = any(keyword in request_lower for keyword in lunch_keywords)
-        is_evening_request = any(keyword in request_lower for keyword in evening_keywords)
-
-        # Фильтруем времена в зависимости от запрошенного времени суток
-        if is_morning_request:
-            # Фильтруем времена с 9:00 до 11:00
-            morning_times = [time for time in available_times if self._is_time_in_range(time, 9, 0, 11, 30)]
+        # Поиск времени для указанного времени суток
+        if any(keyword in request_lower for keyword in morning_keywords):
+            # Ищем времена с 9:00 до 12:00
+            morning_times = [t for t in available_times if self._is_time_in_range(t, 9, 0, 12, 0)]
             if morning_times:
-                selected_time = morning_times[0]  # Выбираем самое раннее утреннее время
-                self.logger.info(f"Morning time requested. Selected time: {selected_time}")
-                return selected_time, None
-            else:
-                self.logger.info("No morning times available")
-                return None, "На указанную дату нет доступных утренних часов"
+                logger.info(f"Selected morning time: {morning_times[0]}")
+                return morning_times[0], None
 
-        elif is_lunch_request:
-            # Фильтруем времена с 12:00 до 15:00
-            lunch_times = [time for time in available_times if self._is_time_in_range(time, 12, 0, 15, 0)]
+        if any(keyword in request_lower for keyword in lunch_keywords):
+            # Ищем времена с 12:00 до 15:00
+            lunch_times = [t for t in available_times if self._is_time_in_range(t, 12, 0, 15, 0)]
             if lunch_times:
-                selected_time = lunch_times[0]  # Выбираем самое раннее обеденное время
-                self.logger.info(f"Lunch time requested. Selected time: {selected_time}")
-                return selected_time, None
-            else:
-                self.logger.info("No lunch times available")
-                return None, "На указанную дату нет доступных часов на обед"
+                logger.info(f"Selected lunch time: {lunch_times[0]}")
+                return lunch_times[0], None
 
-        elif is_evening_request:
-            # Фильтруем времена с 17:00 до 20:00
-            evening_times = [time for time in available_times if self._is_time_in_range(time, 17, 0, 20, 0)]
+        if any(keyword in request_lower for keyword in evening_keywords):
+            # Ищем времена с 17:00 до 21:00
+            evening_times = [t for t in available_times if self._is_time_in_range(t, 17, 0, 21, 0)]
             if evening_times:
-                selected_time = evening_times[0]  # Выбираем самое раннее вечернее время
-                self.logger.info(f"Evening time requested. Selected time: {selected_time}")
-                return selected_time, None
-            else:
-                self.logger.info("No evening times available")
-                return None, "На указанную дату нет доступных вечерних часов"
+                logger.info(f"Selected evening time: {evening_times[0]}")
+                return evening_times[0], None
 
-        # Если время суток не указано, выбираем самое раннее время из всех доступных
-        earliest_time = available_times[0]
-        self.logger.info(
-            f"Simple scheduling request detected. Automatically selecting earliest time: {earliest_time.split()[-1]}")
-        return earliest_time, None
+        # Если не нашли подходящее время для запрошенного периода
+        # или запрос без указания времени суток - берем самое раннее время
+        logger.info(f"Falling back to earliest time: {available_times[0]}")
+        return available_times[0], None
 
     def _is_time_in_range(self, time_str, start_hour, start_minute, end_hour, end_minute):
-        """
-        Проверяет, находится ли время в указанном диапазоне
-        """
-        if not time_str:
-            return False
-
+        """Проверяет, находится ли время в указанном диапазоне"""
         try:
-            # Пример формата: '2025-03-19 9:30'
+            # Извлекаем время из строки (возможно формат - "YYYY-MM-DD HH:MM" или просто "HH:MM")
             parts = time_str.split()
-            if len(parts) < 2:
-                return False
+            time_part = parts[-1] if len(parts) > 1 else time_str
 
-            time_part = parts[1]
+            # Разбиваем время на часы и минуты
             hour, minute = map(int, time_part.split(':'))
 
-            start_time_minutes = start_hour * 60 + start_minute
-            end_time_minutes = end_hour * 60 + end_minute
+            # Переводим всё в минуты для легкого сравнения
             time_minutes = hour * 60 + minute
+            start_minutes = start_hour * 60 + start_minute
+            end_minutes = end_hour * 60 + end_minute
 
-            return start_time_minutes <= time_minutes <= end_time_minutes
+            # Проверяем, входит ли время в диапазон
+            return start_minutes <= time_minutes <= end_minutes
         except Exception as e:
-            self.logger.error(f"Error parsing time: {e}")
+            logger.error(f"Error checking time range: {e}")
             return False
 
     def _get_last_user_message(self, thread_id):
@@ -671,3 +720,77 @@ class AssistantClient:
         except Exception as e:
             logger.error(f"Error getting last user message: {e}")
             return ""
+
+    def _extract_time_of_day(self, text):
+        """Extract time of day references from text"""
+        if any(kw in text for kw in ["утр", "утром", "с утра", "на утро", "рано"]):
+            return "утро"
+        elif any(kw in text for kw in ["обед", "днем", "дневн", "полдень"]):
+            return "обед"
+        elif any(kw in text for kw in ["вечер", "ужин", "вечером", "поздн"]):
+            return "вечер"
+        return None
+
+    def _parse_relative_date(self, text):
+        """Parse relative date references like 'через неделю'"""
+        today = datetime.now()
+        text = text.lower()
+
+        # Extract number of days/weeks/months
+        match = re.search(r'через (\d+) (день|дня|дней|недел[юяи]|месяц|месяца|месяцев)', text)
+        if match:
+            number = int(match.group(1))
+            unit = match.group(2)
+
+            if "день" in unit or "дня" in unit or "дней" in unit:
+                target_date = today + timedelta(days=number)
+            elif "недел" in unit:
+                target_date = today + timedelta(weeks=number)
+            elif "месяц" in unit or "месяца" in unit or "месяцев" in unit:
+                # Approximate a month as 30 days
+                target_date = today + timedelta(days=number * 30)
+
+            return target_date.strftime("%Y-%m-%d")
+
+        # Handle "через неделю" without number
+        if "через неделю" in text:
+            target_date = today + timedelta(weeks=1)
+            return target_date.strftime("%Y-%m-%d")
+
+        return text  # Return original if no match
+
+    def _is_time_earlier(self, time_str, reference_time):
+        """Check if time is earlier than reference time"""
+        try:
+            if len(time_str.split()) > 1:
+                time_str = time_str.split()[1]  # Extract time part
+            if len(reference_time.split()) > 1:
+                reference_time = reference_time.split()[1]  # Extract time part
+
+            time_parts = time_str.split(':')
+            ref_parts = reference_time.split(':')
+
+            time_minutes = int(time_parts[0]) * 60 + int(time_parts[1])
+            ref_minutes = int(ref_parts[0]) * 60 + int(ref_parts[1])
+
+            return time_minutes < ref_minutes
+        except Exception:
+            return False
+
+    def _is_time_later(self, time_str, reference_time):
+        """Check if time is later than reference time"""
+        try:
+            if len(time_str.split()) > 1:
+                time_str = time_str.split()[1]  # Extract time part
+            if len(reference_time.split()) > 1:
+                reference_time = reference_time.split()[1]  # Extract time part
+
+            time_parts = time_str.split(':')
+            ref_parts = reference_time.split(':')
+
+            time_minutes = int(time_parts[0]) * 60 + int(time_parts[1])
+            ref_minutes = int(ref_parts[0]) * 60 + int(ref_parts[1])
+
+            return time_minutes > ref_minutes
+        except Exception:
+            return False
