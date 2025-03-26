@@ -92,15 +92,16 @@ def format_time_with_date(date_str, time_obj):
     """
     return f"{date_str} {time_obj.strftime('%H:%M')}"
 
+
 def compare_times(free_intervals, user_time, user_date):
     """
     Сравниваем время начала записи предпочитаемым пациенту, чтобы перезаписаться, и свободное время записей, пришедших из
-    ответа сервера.
+    ответа сервера. Возвращает все свободные времена с датой вместо только трех ближайших.
 
     :param free_intervals: Список свободных интервалов времени
     :param user_time: Время пользователя в формате 'HH:MM:SS' или объект time
     :param user_date: Дата в формате 'YYYY-MM-DD'
-    :return: Время пользователя, если есть совпадение, или 10 ближайших свободных времени с датой
+    :return: Время пользователя, если есть совпадение, или все свободные времена с датой
     """
 
     logger.info(f'Нахожусь в функции compare_times\nЖелаемое время пользователя: {user_time}\n')
@@ -113,8 +114,7 @@ def compare_times(free_intervals, user_time, user_date):
     else:
         raise ValueError("user_time должен быть строкой или объектом time")
 
-    matched_intervals = []
-
+    # Проверяем совпадение времени пользователя с доступными интервалами
     for interval in free_intervals:
         start_time = normalize_time_for_returning_answer(interval['start_time'])
 
@@ -126,34 +126,31 @@ def compare_times(free_intervals, user_time, user_date):
             logger.info(f"Время пользователя совпадает с интервалом {interval['start_time']} - {interval['end_time']}")
             return f"{user_date} {user_time_obj.strftime('%H:%M')}"
 
-        # Вычисляем разницу времени
-        time_difference = abs((datetime.combine(datetime.today(), start_time) - datetime.combine(
-            datetime.today(), user_time_obj)).total_seconds())
+    # Если совпадений нет, возвращаем все доступные времена
+    available_times = []
 
-        matched_intervals.append({
-            'start_time': format_time_with_date(user_date, start_time),  # Форматируем с датой
-            'time_difference': time_difference
-        })
+    for interval in free_intervals:
+        start_time = normalize_time_for_returning_answer(interval['start_time'])
 
-    # Сортируем по времени разницы и выбираем 3 ближайших
-    nearest_intervals = sorted(matched_intervals, key=lambda x: x['time_difference'])[:3]
+        # Пропускаем интервалы меньше 09:00 и больше или равно 21:00
+        if start_time < time(9, 0) or start_time >= time(21, 0):
+            continue
 
-    logger.info("Нет совпадений по свободным интервалам. Ближайшие 10 времен:")
-    for interval in nearest_intervals:
-        logger.info(f"Ближайшее время: {interval['start_time']} с разницей {interval['time_difference']} секунд")
+        available_times.append(format_time_with_date(user_date, start_time))
 
-    return [interval['start_time'] for interval in nearest_intervals]  # Возвращаем ближайшие времена с датой
+    logger.info(f"Нет совпадений. Возвращаем все доступные времена: {len(available_times)} слотов")
+    return available_times
 
 
 def compare_times_for_redis(free_intervals, user_time, user_date):
     """
     Для Redis. Сравниваем время начала записи предпочитаемым пациенту, чтобы перезаписаться, и свободное время записей, пришедших из
-    ответа сервера.
+    ответа сервера. Возвращает все свободные времена с датой.
 
     :param free_intervals: Список свободных интервалов времени
     :param user_time: Время пользователя в формате 'HH:MM:SS' или объект time
     :param user_date: Дата в формате 'YYYY-MM-DD'
-    :return: Время пользователя, если есть совпадение, или 10 ближайших свободных времени с датой
+    :return: Все свободные времена с датой
     """
 
     logger.info(f'Нахожусь в функции compare_times_for_redis\nЖелаемое время пользователя: {user_time}\n')
@@ -166,7 +163,8 @@ def compare_times_for_redis(free_intervals, user_time, user_date):
     else:
         raise ValueError("user_time должен быть строкой или объектом time")
 
-    matched_intervals = []
+    # Собираем все доступные времена
+    available_times = []
 
     for interval in free_intervals:
         start_time = normalize_time_for_receptions(interval['start_time'])
@@ -179,25 +177,21 @@ def compare_times_for_redis(free_intervals, user_time, user_date):
         if start_time == user_time_obj:
             continue
 
-        # Вычисляем разницу времени
-        time_difference = abs((datetime.combine(datetime.today(), start_time) - datetime.combine(
-            datetime.today(), user_time_obj)).total_seconds())
+        available_times.append(format_time_with_date(user_date, start_time))
 
-        matched_intervals.append({
-            'start_time': format_time_with_date(user_date, start_time),  # Форматируем с датой
-            'time_difference': time_difference
-        })
-
-    # Сортируем по времени разницы и выбираем 3 ближайших
-    nearest_intervals = sorted(matched_intervals, key=lambda x: x['time_difference'])[:3]
-
-    for interval in nearest_intervals:
-        logger.info(f"Ближайшее время: {interval['start_time']} с разницей {interval['time_difference']} секунд")
-
-    return [interval['start_time'] for interval in nearest_intervals]  # Возвращаем ближайшие времена с датой
+    logger.info(f"Возвращаем все доступные времена: {len(available_times)} слотов")
+    return available_times
 
 
 def compare_and_suggest_times(free_intervals, user_time, user_date):
+    """
+    Возвращает все доступные времена на выбранную дату.
+
+    :param free_intervals: Список свободных интервалов времени
+    :param user_time: Время пользователя в формате 'HH:MM:SS' или объект time
+    :param user_date: Дата в формате 'YYYY-MM-DD'
+    :return: Список всех доступных времен с датой
+    """
     logger.info(f'Нахожусь в функции compare_and_suggest_times\nЖелаемое время пользователя: {user_time}\n')
 
     # Проверяем тип user_time и преобразуем его, если это необходимо
@@ -209,7 +203,8 @@ def compare_and_suggest_times(free_intervals, user_time, user_date):
         logger.info(f"Некорректный тип user_time: {type(user_time)}")
         raise ValueError("user_time должен быть строкой или объектом time")
 
-    matched_intervals = []
+    # Собираем все доступные времена
+    available_times = []
 
     for interval in free_intervals:
         start_time = normalize_time_for_receptions(interval['start_time'])
@@ -222,24 +217,10 @@ def compare_and_suggest_times(free_intervals, user_time, user_date):
         if start_time == user_time_obj:
             continue
 
-        # Вычисляем разницу времени
-        time_difference = abs((datetime.combine(datetime.today(), start_time) - datetime.combine(
-            datetime.today(), user_time_obj)).total_seconds())
+        available_times.append(format_time_with_date(user_date, start_time))
 
-        matched_intervals.append({
-            'start_time': format_time_with_date(user_date, start_time),  # Форматируем с датой
-            'time_difference': time_difference
-        })
-
-    # Сортируем по разнице времени и выбираем 3 ближайших
-    nearest_intervals = sorted(matched_intervals, key=lambda x: x['time_difference'])[:3]
-
-    logger.info("Время занято. Предлагаем 10 ближайших свободных времен:")
-    for interval in nearest_intervals:
-        logger.info(f"Ближайшее время: {interval['start_time']} с разницей {interval['time_difference']} секунд")
-
-    return [interval['start_time'] for interval in nearest_intervals]
-
+    logger.info(f"Время занято. Предлагаем {len(available_times)} свободных времен:")
+    return available_times
 
 def redis_reception_appointment(patient_id, appointment_time):
     """

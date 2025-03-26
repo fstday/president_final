@@ -37,7 +37,7 @@ key_file_path = os.path.join(certs_dir, 'key.pem')
 
 def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
     """
-    Updated function to work with the new Appointment model.
+    Updated function to work with the new approach that returns all available times.
     """
     logger.info(f"🚀 Starting reserve_reception_for_patient with patient_id={patient_id}, "
                 f"date_from_patient={date_from_patient}, trigger_id={trigger_id}")
@@ -225,7 +225,8 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
                 freetype = interval.find('ns:FREETYPE', namespace).text
 
                 # Выводим данные перед добавлением в список
-                logger.info(f"Parsed interval: BHOUR={bhour}, BMIN={bmin}, FHOUR={fhour}, FMIN={fmin}, FREETYPE={freetype}")
+                logger.info(
+                    f"Parsed interval: BHOUR={bhour}, BMIN={bmin}, FHOUR={fhour}, FMIN={fmin}, FREETYPE={freetype}")
 
                 if freetype == '1':  # Только свободные интервалы
                     start_time = f"{bhour}:{bmin.zfill(2)}"
@@ -237,12 +238,13 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
 
             # Обработка для trigger_id == 2
             if trigger_id == 2:
-                result_time = compare_times_for_redis(free_time_intervals, time_obj, date_part)
+                # Получаем все доступные времена вместо только 3 ближайших
+                result_times = compare_times_for_redis(free_time_intervals, time_obj, date_part)
 
                 answer = {
                     'status': 'suggest_times',
-                    'suggested_times_ten': result_time,
-                    'message': f'Данное время {date_from_patient} было занято. Возвращаем ближайшие 10 свободных времен',
+                    'suggested_times': result_times,
+                    'message': f'Данное время {date_from_patient} было занято. Возвращаем все свободные времена',
                     'action': 'reserve'
                 }
                 logger.info(answer)
@@ -251,50 +253,43 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
 
             # Обработка для trigger_id == 1
             elif trigger_id == 1:
+                # Проверяем совпадение с запрошенным временем или получаем все доступные времена
                 result_time = compare_times(free_time_intervals, time_obj, date_part)
 
+                # Если result_time - список (все доступные времена)
                 if isinstance(result_time, list):
-                    answer = {
-                        'status': 'suggest_times',
-                        'suggested_times': result_time,
-                        'message': f'Данное время {date_from_patient} было занято. Возвращаем ближайшие 10 свободных времен',
-                        'action': 'reserve'
-                    }
+                    # Проверяем, есть ли точное совпадение с запрошенным временем
+                    exact_match = f"{date_part} {time_obj.strftime('%H:%M')}"
+                    if exact_match in result_time:
+                        # Если есть точное совпадение, используем его
+                        logger.info(f'Found exact match for requested time: {exact_match}')
+                        return schedule_rec_reserve(
+                            result_time=exact_match,
+                            doctor_id=doctor_id,
+                            date_part=date_part,
+                            patient_id=patient_id,
+                            date_obj=date_obj,
+                            schedident_text=schedident_text,
+                            free_intervals=free_time_intervals,
+                            is_reschedule=is_reschedule,
+                            schedid=schedid
+                        )
+                    else:
+                        # Если точного совпадения нет, возвращаем все доступные времена
+                        answer = {
+                            'status': 'suggest_times',
+                            'suggested_times': result_time,
+                            'message': f'Данное время {date_from_patient} было занято. Возвращаем все свободные времена',
+                            'action': 'reserve'
+                        }
 
-                    logger.info(answer)
-                    return answer
-
-                # Replace this code in reserve_reception_for_patient.py
-
+                        logger.info(answer)
+                        return answer
+                # Если result_time - строка (точное совпадение найдено)
                 elif result_time:
                     logger.info(f'Found suitable time {result_time}')
 
-                    # Check for existing appointments for this patient
-                    try:
-                        found_patient = Patient.objects.get(patient_code=patient_id)
-
-                        # Look for active infoclinica appointments to determine if this is a reschedule
-                        existing_appointment = Appointment.objects.filter(
-                            patient=found_patient,
-                            is_active=True,
-                            is_infoclinica_id=True
-
-                        ).first()
-
-                        is_reschedule = existing_appointment is not None
-                        schedid = existing_appointment.appointment_id if is_reschedule else None
-
-
-                    except Patient.DoesNotExist:
-                        # Handle error if patient not found
-                        return {"status": "error", "message": "Patient not found"}
-
-                    except Exception as e:
-                        logger.error(f"Error checking existing appointments: {str(e)}")
-                        is_reschedule = False
-                        schedid = None
-
-                    answer = schedule_rec_reserve(
+                    return schedule_rec_reserve(
                         result_time=result_time,
                         doctor_id=doctor_id,
                         date_part=date_part,
@@ -305,26 +300,30 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
                         is_reschedule=is_reschedule,
                         schedid=schedid
                     )
-
-                    logger.info(answer)
-                    return answer
-
                 else:
                     logger.info('Подходящее время не найдено')
                     answer = {
                         'message': f'Подходящее время не найдено'
-
                     }
                     return answer
 
             # Обработка для trigger_id == 3 (когда нужно на конкретный день узнать доступные записи)
             elif trigger_id == 3:
-                result_time = compare_times(free_time_intervals, time_obj, date_part)
+                # Для этого режима просто возвращаем все доступные времена в формате списка
+                # В формате: ['2025-03-19 09:30', '2025-03-19 10:00', ...]
+                result_times = []
+                for interval in free_time_intervals:
+                    start_time = interval["start_time"]
+                    time_hour, time_min = map(int, start_time.split(':'))
+                    # Пропускаем интервалы до 9:00 и после 21:00
+                    if (time_hour < 9) or (time_hour >= 21):
+                        continue
+                    # Формируем строку времени с датой
+                    formatted_time = f"{date_part} {start_time}"
+                    result_times.append(formatted_time)
 
-                if free_time_intervals:
-                    return result_time
-                else:
-                    return None
+                logger.info(f"Доступные времена для триггера 3: {result_times}")
+                return result_times
         else:
             logger.info('Ошибка при запросе:', response.status_code)
             logger.info('Ответ сервера:', response.text)

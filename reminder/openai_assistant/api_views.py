@@ -10,6 +10,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from reminder.models import Patient, Appointment, Assistant, Thread, Run, IgnoredPatient
+from reminder.openai_assistant.assistant_instructions import get_enhanced_assistant_prompt
 from reminder.openai_assistant.assistant_tools import format_response
 
 logger = logging.getLogger(__name__)
@@ -185,6 +186,8 @@ def create_assistant_with_tools(client, name: str, instructions: str, model: str
     """
     Создает или обновляет ассистента с инструментами (tools).
     """
+    if instructions is None:
+        instructions = get_enhanced_assistant_prompt()
     TOOLS = [
         {
             "type": "function",

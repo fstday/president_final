@@ -13,9 +13,11 @@ from reminder.infoclinica_requests.utils import format_doctor_name, format_russi
 def which_time_in_certain_day(patient_code, date_time):
     """
     Обработка запроса для получения доступных интервалов на определенный день.
+    Возвращает все доступные слоты вместо только первых трех.
     """
     global doctor_name
-    logger.info(f"Я в функции which_time_in_certain_day\nПришедшие данные: \npatient_code: {patient_code}\ndate_time: {date_time}")
+    logger.info(
+        f"Я в функции which_time_in_certain_day\nПришедшие данные: \npatient_code: {patient_code}\ndate_time: {date_time}")
 
     if len(date_time) == 10:
         date_time += " 00:00"
@@ -86,7 +88,15 @@ def which_time_in_certain_day(patient_code, date_time):
             return parts[-1]  # Возвращаем только время
         return None
 
-    # Извлечение первых трех интервалов
+    # Формируем список всех доступных времен
+    all_available_times = []
+
+    for interval in result_intervals:
+        time_value = extract_time(interval)
+        if time_value:
+            all_available_times.append(time_value)
+
+    # Получаем также первые три времени для обратной совместимости
     first_time = extract_time(result_intervals[0]) if len(result_intervals) > 0 else None
     second_time = extract_time(result_intervals[1]) if len(result_intervals) > 1 else None
     third_time = extract_time(result_intervals[2]) if len(result_intervals) > 2 else None
@@ -98,10 +108,11 @@ def which_time_in_certain_day(patient_code, date_time):
 
     response = {
         'status': response_status,
-        'message': f'На дату {formatted_date} доступны следующие времена: {first_time}, {second_time}, {third_time}',
+        'message': f'На дату {formatted_date} доступны следующие времена: {", ".join(all_available_times[:5])} и другие',
         'time_1': first_time,
         'time_2': second_time,
         'time_3': third_time,
+        'all_available_times': all_available_times,  # Добавляем полный список времен
         'date': formatted_date,
         'doctor': formatted_doc_name_final,
         'weekday': weekday,
@@ -110,5 +121,6 @@ def which_time_in_certain_day(patient_code, date_time):
 
     return JsonResponse(response)
 
+
 if __name__ == '__main__':
-    which_time_in_certain_day(reception_id=990000612, date_time="2025-03-18")
+    which_time_in_certain_day(patient_code=990000612, date_time="2025-03-18")

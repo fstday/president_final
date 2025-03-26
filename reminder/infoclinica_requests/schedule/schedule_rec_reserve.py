@@ -35,6 +35,7 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
     """
     Функция резервирует время при его успешном нахождении в свободных окошках.
     Отправляет XML запрос и резервирует свободное время за клиентом. Метод: WEB_SCHEDULE_REC_RESERVE
+    Обновлена для работы с полным списком доступных времен.
 
     :param result_time: Выбранное время для записи
     :param doctor_id: ID врача
@@ -275,13 +276,13 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                     if sp_result == 0:
                         logger.info('К сожалению, выбранное время было недавно занято.')
 
-                        user_time = result_time.time()
-                        available_times = compare_and_suggest_times(free_intervals, user_time, date_part)
+                        # Возвращаем все доступные времена
+                        available_times = compare_and_suggest_times(free_intervals, result_time.time(), date_part)
 
                         answer = {
                             'status': 'suggest_times',
                             'suggested_times': available_times,
-                            'message': f'Время приема {result_time} занято. Возвращаю ближайшие свободные времена для записи',
+                            'message': f'Время приема {result_time} занято. Возвращаю все свободные времена для записи',
                             'action': 'reserve'
                         }
 
