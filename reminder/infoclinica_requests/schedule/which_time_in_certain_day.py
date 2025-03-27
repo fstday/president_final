@@ -106,6 +106,22 @@ def which_time_in_certain_day(patient_code, date_time):
     days = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
     weekday = days[date_time_obj.weekday()]
 
+    # Определяем корректный статус ответа в зависимости от количества доступных времен
+    if len(all_available_times) == 1:
+        if response_status == 'which_time_today':
+            response_status = 'only_first_time_today'
+        elif response_status == 'which_time_tomorrow':
+            response_status = 'only_first_time_tomorrow'
+        else:
+            response_status = 'only_first_time'
+    elif len(all_available_times) == 2:
+        if response_status == 'which_time_today':
+            response_status = 'only_two_time_today'
+        elif response_status == 'which_time_tomorrow':
+            response_status = 'only_two_time_tomorrow'
+        else:
+            response_status = 'only_two_time'
+
     response = {
         'status': response_status,
         'message': f'На дату {formatted_date} доступны следующие времена: {", ".join(all_available_times[:5])} и другие',

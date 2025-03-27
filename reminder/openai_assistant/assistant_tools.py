@@ -1,5 +1,10 @@
 import json
+import re
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 # Updated tools definitions with clearer descriptions and examples
 TOOLS = [
@@ -472,7 +477,9 @@ RESPONSE_TEMPLATES = {
 
 def format_response(status_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Formats response according to the required format from documentation
+    Formats response according to the required format from documentation.
+    Improved to correctly handle different status types and ensure they match
+    the expected format.
 
     Args:
         status_type: Response status type
@@ -481,22 +488,128 @@ def format_response(status_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         dict: Formatted response
     """
+    # Определяем динамически статус для сегодня/завтра
+    if "_today" not in status_type and "_tomorrow" not in status_type:
+        try:
+            date_fields = []
+            # Находим все поля с датой
+            for field in ["date", "appointment_date", "date_time", "date_from_patient"]:
+                if field in data and data[field]:
+                    date_fields.append(data[field])
+
+            if date_fields:
+                # Берем первую найденную дату
+                date_str = date_fields[0]
+
+                # Если дата в формате "29 января" - не пытаемся парсить
+                if not any(c.isdigit() for c in date_str):
+                    pass
+                else:
+                    # Извлекаем только часть даты, если есть и дата и время
+                    if " " in date_str and re.match(r"\d{4}-\d{2}-\d{2}", date_str.split(" ")[0]):
+                        date_str = date_str.split(" ")[0]
+
+                    # Понимаем различные форматы даты
+                    date_formats = ["%Y-%m-%d", "%d.%m.%Y", "%d-%m-%Y"]
+
+                    # Пробуем разные форматы
+                    date_obj = None
+                    for fmt in date_formats:
+                        try:
+                            date_obj = datetime.strptime(date_str, fmt).date()
+                            break
+                        except ValueError:
+                            continue
+
+                    # Если удалось распознать дату
+                    if date_obj:
+                        today = datetime.now().date()
+                        tomorrow = today + timedelta(days=1)
+
+                        # Дополняем статус информацией о дне
+                        if date_obj == today:
+                            if status_type == "success_change_reception":
+                                status_type = "success_change_reception_today"
+                            elif status_type == "which_time":
+                                status_type = "which_time_today"
+                            elif status_type == "error_empty_windows":
+                                status_type = "error_empty_windows_today"
+                            elif status_type == "only_first_time":
+                                status_type = "only_first_time_today"
+                            elif status_type == "only_two_time":
+                                status_type = "only_two_time_today"
+                            elif status_type == "error_change_reception":
+                                status_type = "error_change_reception_today"
+                            elif status_type == "change_only_first_time":
+                                status_type = "change_only_first_time_today"
+                            elif status_type == "change_only_two_time":
+                                status_type = "change_only_two_time_today"
+                        elif date_obj == tomorrow:
+                            if status_type == "success_change_reception":
+                                status_type = "success_change_reception_tomorrow"
+                            elif status_type == "which_time":
+                                status_type = "which_time_tomorrow"
+                            elif status_type == "error_empty_windows":
+                                status_type = "error_empty_windows_tomorrow"
+                            elif status_type == "only_first_time":
+                                status_type = "only_first_time_tomorrow"
+                            elif status_type == "only_two_time":
+                                status_type = "only_two_time_tomorrow"
+                            elif status_type == "error_change_reception":
+                                status_type = "error_change_reception_tomorrow"
+                            elif status_type == "change_only_first_time":
+                                status_type = "change_only_first_time_tomorrow"
+                            elif status_type == "change_only_two_time":
+                                status_type = "change_only_two_time_tomorrow"
+        except Exception as e:
+            logger.error(f"Error determining today/tomorrow status: {e}")
+
+    # Проверка на количество доступных времен
+    if status_type.startswith("which_time") and not status_type.startswith("which_time_in_certain_day"):
+        # Проверяем, сколько времен доступно
+        time_fields = ["time_1", "time_2", "time_3", "first_time", "second_time", "third_time"]
+        times = []
+
+        for field in time_fields:
+            if field in data and data[field]:
+                times.append(data[field])
+
+        # Определяем правильный статус в зависимости от количества доступных времен
+        if len(times) == 1:
+            if "today" in status_type:
+                status_type = "only_first_time_today"
+            elif "tomorrow" in status_type:
+                status_type = "only_first_time_tomorrow"
+            else:
+                status_type = "only_first_time"
+        elif len(times) == 2:
+            if "today" in status_type:
+                status_type = "only_two_time_today"
+            elif "tomorrow" in status_type:
+                status_type = "only_two_time_tomorrow"
+            else:
+                status_type = "only_two_time"
+
+    # Получаем шаблон для указанного статуса
     if status_type in RESPONSE_TEMPLATES:
         template = RESPONSE_TEMPLATES[status_type].copy()
 
-        # Fill template with data
+        # Заполняем шаблон данными
         for key, value in template.items():
             if isinstance(value, str) and "{" in value and "}" in value:
                 field_name = value.strip("{}")
                 if field_name in data:
                     template[key] = data[field_name]
 
-        # Add additional fields if they exist in data but not in template
+        # Добавляем дополнительные поля
         for key, value in data.items():
             if key not in template and key != "status":
                 template[key] = value
 
         return template
 
-    # If there's no template, return data as is
+    # Если нет соответствующего шаблона, возвращаем исходные данные
+    # Но добавляем корректный статус
+    if 'status' not in data:
+        data['status'] = status_type
     return data
