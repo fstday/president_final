@@ -68,9 +68,15 @@ def get_date_relation(date_obj):
     today = datetime.now().date()
     tomorrow = today + timedelta(days=1)
 
-    if date_obj.date() == today:
+    # Убедимся, что у нас есть объект datetime, а не просто date
+    if isinstance(date_obj, datetime):
+        date_only = date_obj.date()
+    else:
+        date_only = date_obj
+
+    if date_only == today:
         return "today"
-    elif date_obj.date() == tomorrow:
+    elif date_only == tomorrow:
         return "tomorrow"
     else:
         return None
@@ -141,12 +147,31 @@ def extract_time_of_day(text):
     return None
 
 
-# Функция для определения даты из текста
 def extract_date_from_text(text):
     """
-    Извлекает дату из текста запроса
+    Извлекает дату из текста запроса, включая относительные даты
     """
     today = datetime.now()
+
+    # НОВОЕ: Проверка на "через X дней/недель/месяцев"
+    relative_date_match = re.search(r'через (\d+) (день|дня|дней|недел[юяи]|месяц|месяца|месяцев)', text)
+    if relative_date_match:
+        number = int(relative_date_match.group(1))
+        unit = relative_date_match.group(2).lower()
+
+        if "день" in unit or "дня" in unit or "дней" in unit:
+            return today + timedelta(days=number)
+        elif "недел" in unit:
+            return today + timedelta(days=number * 7)
+        elif "месяц" in unit or "месяца" in unit or "месяцев" in unit:
+            # Приблизительно месяц как 30 дней
+            return today + timedelta(days=number * 30)
+
+    # НОВОЕ: Проверка на "через неделю", "через месяц" без указания числа
+    if "через неделю" in text.lower():
+        return today + timedelta(days=7)
+    elif "через месяц" in text.lower():
+        return today + timedelta(days=30)
 
     # Проверяем на сегодня/завтра
     if "сегодня" in text:
@@ -285,7 +310,6 @@ def format_available_times_response(times, date_obj, specialist_name, relation=N
     return response
 
 
-# Функция для форматирования ответа об успешной записи/переносе
 def format_success_scheduling_response(time, date_obj, specialist_name, relation=None):
     """
     Форматирует ответ об успешной записи/переносе
@@ -302,13 +326,30 @@ def format_success_scheduling_response(time, date_obj, specialist_name, relation
     # Получаем форматированную информацию о дате
     date_info = format_date_info(date_obj)
 
-    # Определяем статус
-    if relation == "today":
+    # Отношение к сегодня/завтра на основе даты, а не переданного relation
+    # (исправляем ошибку, когда "через неделю" помечалось как "сегодня")
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+
+    if date_obj.date() == today:
+        relation = "today"
         status = "success_change_reception_today"
-    elif relation == "tomorrow":
+    elif date_obj.date() == tomorrow:
+        relation = "tomorrow"
         status = "success_change_reception_tomorrow"
     else:
+        relation = None
         status = "success_change_reception"
+
+    # Нормализуем формат времени - убираем дату и секунды, если они есть
+    if isinstance(time, str):
+        # Если время в формате "YYYY-MM-DD HH:MM:SS"
+        if " " in time and len(time) > 10:
+            time = time.split(" ")[1]  # Берем только часть времени
+
+        # Если время содержит секунды (HH:MM:SS), убираем их
+        if time.count(":") == 2:
+            time = ":".join(time.split(":")[:2])
 
     # Базовый ответ
     response = {
@@ -642,18 +683,21 @@ def process_voicebot_request(request):
 
         # Обработка в зависимости от намерения
         if intent in ["schedule", "reschedule"]:
-            # Извлекаем дату и время из запроса
+            # Извлекаем дату из запроса с учетом относительных дат
             date_obj = extract_date_from_text(processed_input)
+
+            # Логируем определенную дату для контроля
+            logger.info(f"Определена дата: {date_obj.strftime('%Y-%m-%d')}")
 
             # Проверяем, указал ли пользователь конкретное время
             explicit_time = re.search(r'(\d{1,2})[:\s](\d{2})', processed_input) or any(
                 keyword in processed_input for keyword in ["утр", "обед", "вечер"])
 
             if not explicit_time:
-                # Если пользователь НЕ указал конкретное время (просто "перенеси на сегодня")
+                # Если пользователь НЕ указал конкретное время
                 logger.info("Пользователь не указал конкретное время, проверяем доступные времена")
 
-                # Сначала получаем список доступных времен
+                # Сначала получаем список доступных времен на указанную дату
                 formatted_date = date_obj.strftime('%Y-%m-%d')
                 available_times_result = which_time_in_certain_day(patient_code, formatted_date)
 
