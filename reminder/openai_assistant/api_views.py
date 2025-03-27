@@ -149,70 +149,14 @@ def extract_time_of_day(text):
 
 def extract_date_from_text(text):
     """
-    Извлекает дату из текста запроса, включая относительные даты
+    Возвращает текущую дату, делегируя всю логику определения даты ассистенту.
+
+    Функция намеренно упрощена, чтобы ассистент полностью контролировал
+    интерпретацию даты и времени.
     """
-    today = datetime.now()
-
-    # НОВОЕ: Проверка на "через X дней/недель/месяцев"
-    relative_date_match = re.search(r'через (\d+) (день|дня|дней|недел[юяи]|месяц|месяца|месяцев)', text)
-    if relative_date_match:
-        number = int(relative_date_match.group(1))
-        unit = relative_date_match.group(2).lower()
-
-        if "день" in unit or "дня" in unit or "дней" in unit:
-            return today + timedelta(days=number)
-        elif "недел" in unit:
-            return today + timedelta(days=number * 7)
-        elif "месяц" in unit or "месяца" in unit or "месяцев" in unit:
-            # Приблизительно месяц как 30 дней
-            return today + timedelta(days=number * 30)
-
-    # НОВОЕ: Проверка на "через неделю", "через месяц" без указания числа
-    if "через неделю" in text.lower():
-        return today + timedelta(days=7)
-    elif "через месяц" in text.lower():
-        return today + timedelta(days=30)
-
-    # Проверяем на сегодня/завтра
-    if "сегодня" in text:
-        return today
-    elif "завтра" in text:
-        return today + timedelta(days=1)
-
-    # Проверяем на день недели
-    days_of_week = {
-        "понедельник": 0, "вторник": 1, "среда": 2, "среду": 2, "четверг": 3,
-        "пятница": 4, "пятницу": 4, "суббота": 5, "субботу": 5, "воскресенье": 6, "воскресенье": 6
-    }
-
-    for day_name, day_num in days_of_week.items():
-        if day_name in text:
-            # Находим следующее вхождение этого дня
-            days_ahead = (day_num - today.weekday()) % 7
-            if days_ahead == 0:  # Сегодня
-                days_ahead = 7  # Следующая неделя
-            return today + timedelta(days=days_ahead)
-
-    # Проверяем на конкретную дату в формате DD.MM или DD/MM
-    date_match = re.search(r'(\d{1,2})[./](\d{1,2})', text)
-    if date_match:
-        day = int(date_match.group(1))
-        month = int(date_match.group(2))
-        year = today.year
-
-        # Если месяц уже прошел, берем следующий год
-        if month < today.month:
-            year += 1
-        elif month == today.month and day < today.day:
-            year += 1
-
-        try:
-            return datetime(year, month, day)
-        except ValueError:
-            pass
-
-    # По умолчанию возвращаем сегодня
-    return today
+    logger.info(f"Запрос на определение даты для текста: {text}")
+    logger.warning("Внимание: Определение даты полностью делегировано ассистенту.")
+    return None
 
 
 # Функция для извлечения времени из текста
