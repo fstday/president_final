@@ -92,43 +92,6 @@ def format_date_info(date_obj):
         }
 
 
-# Функция для определения, является ли дата сегодняшней или завтрашней
-def get_date_relation(date_obj):
-    """
-    Determines relation of date to current day (today/tomorrow/other)
-
-    Args:
-        date_obj: Date object or date string
-
-    Returns:
-        str: 'today', 'tomorrow', or None
-    """
-    try:
-        # Ensure we're working with a date object
-        if isinstance(date_obj, str):
-            try:
-                if " " in date_obj:  # If date with time (YYYY-MM-DD HH:MM)
-                    date_obj = datetime.strptime(date_obj.split(" ")[0], "%Y-%m-%d").date()
-                else:  # If date only (YYYY-MM-DD)
-                    date_obj = datetime.strptime(date_obj, "%Y-%m-%d").date()
-            except ValueError:
-                return None
-        elif hasattr(date_obj, 'date'):  # If it's a datetime object
-            date_obj = date_obj.date()
-
-        today = datetime.now().date()
-        tomorrow = today + timedelta(days=1)
-
-        if date_obj == today:
-            return "today"
-        elif date_obj == tomorrow:
-            return "tomorrow"
-        return None
-    except Exception as e:
-        logger.error(f"Error in get_date_relation: {e}")
-        return None
-
-
 # Функция для предобработки входных данных
 def preprocess_input(text):
     """
@@ -227,85 +190,114 @@ def extract_time_from_text(text):
     return "10:00"
 
 
-# Функция для форматирования ответа со свободными временами
-def format_available_times_response(times, date_obj, specialist_name, relation=None):
+def format_available_times_response(times, date_obj, specialist_name="Специалист", relation=None):
     """
-    Formats response with available times according to the required format.
+    Форматирует ответ с доступными временами согласно требуемой структуре.
 
     Args:
-        times: List of available times
-        date_obj: Date object
-        specialist_name: Name of specialist
-        relation: Relation to current day ('today', 'tomorrow', or None)
+        times: Список доступных времен
+        date_obj: Объект datetime для даты
+        specialist_name: Имя специалиста
+        relation: Отношение к текущему дню ('today', 'tomorrow', or None)
 
     Returns:
-        dict: Formatted response
+        dict: Отформатированный ответ
     """
-    try:
-        # Get formatted date information
-        date_info = format_date_info(date_obj)
+    # Если не был передан relation, определяем его
+    if relation is None:
+        relation = get_date_relation(date_obj)
 
-        # Determine base status based on number of available times
-        if not times:
-            base_status = "error_empty_windows"
-        elif len(times) == 1:
-            base_status = "only_first_time"
-        elif len(times) == 2:
-            base_status = "only_two_time"
-        else:
-            base_status = "which_time"
+    # Форматируем информацию о дате
+    day = date_obj.day
+    month_num = date_obj.month
+    weekday_idx = date_obj.weekday()
 
-        # Add suffix _today or _tomorrow if applicable
+    # Определяем базовый статус в зависимости от количества времен
+    if len(times) == 0:
+        base_status = "error_empty_windows"
+    elif len(times) == 1:
+        base_status = "only_first_time"
+    elif len(times) == 2:
+        base_status = "only_two_time"
+    else:
+        base_status = "which_time"
+
+    # Добавляем суффикс _today или _tomorrow если применимо
+    if relation == "today":
+        status = f"{base_status}_today"
+    elif relation == "tomorrow":
+        status = f"{base_status}_tomorrow"
+    else:
+        status = base_status
+
+    # Базовый ответ
+    response = {
+        "status": status,
+        "date": f"{day} {MONTHS_RU[month_num]}",
+        "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+        "specialist_name": specialist_name,
+        "weekday": WEEKDAYS_RU[weekday_idx],
+        "weekday_kz": WEEKDAYS_KZ[weekday_idx]
+    }
+
+    # Добавляем информацию о дне для сегодня/завтра
+    if relation == "today":
+        response["day"] = "сегодня"
+        response["day_kz"] = "бүгін"
+    elif relation == "tomorrow":
+        response["day"] = "завтра"
+        response["day_kz"] = "ертең"
+
+    # Добавляем доступные времена в зависимости от их количества
+    if times:
+        if len(times) >= 1:
+            response["first_time"] = times[0]
+        if len(times) >= 2:
+            response["second_time"] = times[1]
+        if len(times) >= 3:
+            response["third_time"] = times[2]
+
+    # Добавляем сообщение, если нет доступных времен
+    if not times:
         if relation == "today":
-            status = f"{base_status}_today"
+            response["message"] = "Свободных приемов на сегодня не найдено."
         elif relation == "tomorrow":
-            status = f"{base_status}_tomorrow"
+            response["message"] = "Свободных приемов на завтра не найдено."
         else:
-            status = base_status
+            response["message"] = f"Свободных приемов на {day} {MONTHS_RU[month_num]} не найдено."
 
-        # Base response
-        response = {
-            "status": status,
-            "date": date_info["date"],
-            "date_kz": date_info["date_kz"],
-            "specialist_name": specialist_name,
-            "weekday": date_info["weekday"],
-            "weekday_kz": date_info["weekday_kz"]
-        }
+    return response
 
-        # Add day information if today or tomorrow
-        if relation == "today":
-            response["day"] = "сегодня"
-            response["day_kz"] = "бүгін"
-        elif relation == "tomorrow":
-            response["day"] = "завтра"
-            response["day_kz"] = "ертең"
 
-        # Add available times based on their count
-        if times:
-            if len(times) >= 1:
-                response["first_time"] = times[0]
-            if len(times) >= 2:
-                response["second_time"] = times[1]
-            if len(times) >= 3:
-                response["third_time"] = times[2]
+def get_date_relation(date_obj):
+    """
+    Определяет отношение даты к текущему дню (сегодня/завтра/другой)
 
-        # Add message if no times available
-        if not times:
-            if relation == "today":
-                response["message"] = "Свободных приемов на сегодня не найдено."
-            elif relation == "tomorrow":
-                response["message"] = "Свободных приемов на завтра не найдено."
-            else:
-                response["message"] = f"Свободных приемов на {date_info['date']} не найдено."
+    Args:
+        date_obj: Объект datetime или строка даты
 
-        return response
-    except Exception as e:
-        logger.error(f"Error in format_available_times_response: {e}")
-        return {
-            "status": "error",
-            "message": f"Ошибка при форматировании ответа о доступном времени: {str(e)}"
-        }
+    Returns:
+        str: 'today', 'tomorrow', или None
+    """
+    if isinstance(date_obj, str):
+        try:
+            if " " in date_obj:  # Если дата с временем (YYYY-MM-DD HH:MM)
+                date_obj = datetime.strptime(date_obj.split(" ")[0], "%Y-%m-%d").date()
+            else:  # Если только дата (YYYY-MM-DD)
+                date_obj = datetime.strptime(date_obj, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+    elif hasattr(date_obj, 'date'):  # Если это объект datetime
+        date_obj = date_obj.date()
+
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+
+    if date_obj == today:
+        return "today"
+    elif date_obj == tomorrow:
+        return "tomorrow"
+    return None
 
 
 def format_success_scheduling_response(time, date_obj, specialist_name, relation=None):
@@ -467,170 +459,454 @@ def format_error_scheduling_response(times, date_obj, specialist_name, relation=
 
 def process_which_time_response(response_data, date_obj):
     """
-    Processes and transforms response from which_time_in_certain_day function.
+    Обрабатывает и трансформирует ответ от функции which_time_in_certain_day.
+
+    Args:
+        response_data: Данные ответа от which_time_in_certain_day
+        date_obj: Объект даты для запроса
+
+    Returns:
+        dict: Отформатированный ответ
     """
     try:
-        # Determine relation of date to current day
+        # Преобразуем строку даты в объект datetime, если необходимо
+        if isinstance(date_obj, str):
+            try:
+                if date_obj == "today":
+                    date_obj = datetime.now()
+                elif date_obj == "tomorrow":
+                    date_obj = datetime.now() + timedelta(days=1)
+                elif " " in date_obj:  # Если дата с временем (YYYY-MM-DD HH:MM)
+                    date_obj = datetime.strptime(date_obj.split(" ")[0], "%Y-%m-%d")
+                else:  # Если только дата (YYYY-MM-DD)
+                    date_obj = datetime.strptime(date_obj, "%Y-%m-%d")
+            except ValueError:
+                # Если не удалось разобрать дату, используем текущую
+                date_obj = datetime.now()
+
+        # Определяем отношение даты к текущему дню
         relation = get_date_relation(date_obj)
 
-        # Extract available times
+        # Извлекаем доступные времена
         available_times = []
 
-        # Check different field variants with times
+        # Проверяем разные варианты полей с временами
         if "all_available_times" in response_data and isinstance(response_data["all_available_times"], list):
             available_times = response_data["all_available_times"]
         elif "suggested_times" in response_data and isinstance(response_data["suggested_times"], list):
             available_times = response_data["suggested_times"]
         else:
-            # Check first_time, second_time, third_time fields
+            # Проверяем first_time, second_time, third_time
             for key in ["first_time", "second_time", "third_time"]:
                 if key in response_data and response_data[key]:
                     available_times.append(response_data[key])
 
-            # Check time_1, time_2, time_3... fields
+            # Проверяем time_1, time_2, time_3...
             for i in range(1, 10):
                 key = f"time_{i}"
                 if key in response_data and response_data[key]:
                     available_times.append(response_data[key])
 
-        # Extract only time from "YYYY-MM-DD HH:MM" format
-        available_times = [t.split(" ")[1] if " " in t else t for t in available_times]
+        # Извлекаем только время из формата "YYYY-MM-DD HH:MM"
+        clean_times = []
+        for t in available_times:
+            if isinstance(t, str):
+                if " " in t:  # Формат: "YYYY-MM-DD HH:MM"
+                    clean_times.append(t.split(" ")[1])
+                else:
+                    # Удаляем секунды, если они есть
+                    if t.count(":") == 2:  # Формат: "HH:MM:SS"
+                        clean_times.append(":".join(t.split(":")[:2]))
+                    else:
+                        clean_times.append(t)
 
-        # Remove seconds if present
-        available_times = [":".join(t.split(":")[:2]) if t.count(":") == 2 else t for t in available_times]
+        # Извлекаем имя специалиста
+        specialist_name = response_data.get("specialist_name",
+                                            response_data.get("doctor", "Специалист"))
 
-        # Extract specialist name
-        specialist_name = response_data.get("specialist_name", response_data.get("doctor", "Специалист"))
-
-        # Check if response_data indicates no available slots
+        # Проверяем, указывает ли response_data на отсутствие доступных слотов
         if "status" in response_data and response_data["status"].startswith("error_empty_windows"):
-            # Return no slots message directly
+            # Возвращаем сообщение о отсутствии слотов без изменений
             return response_data
 
-        # Format response
-        return format_available_times_response(available_times, date_obj, specialist_name, relation)
+        # Форматируем информацию о дате
+        day = date_obj.day
+        month_num = date_obj.month
+        weekday_idx = date_obj.weekday()
+
+        # Определяем базовый статус в зависимости от количества времен
+        if not clean_times:
+            status = "error_empty_windows"
+            if relation == "today":
+                status = "error_empty_windows_today"
+            elif relation == "tomorrow":
+                status = "error_empty_windows_tomorrow"
+
+            response = {
+                "status": status,
+                "message": f"Свободных приемов {'на сегодня' if relation == 'today' else 'на завтра' if relation == 'tomorrow' else ''} не найдено."
+            }
+
+            if relation == "today":
+                response["day"] = "сегодня"
+                response["day_kz"] = "бүгін"
+            elif relation == "tomorrow":
+                response["day"] = "завтра"
+                response["day_kz"] = "ертең"
+
+            return response
+
+        elif len(clean_times) == 1:
+            status = "only_first_time"
+            if relation == "today":
+                status = "only_first_time_today"
+            elif relation == "tomorrow":
+                status = "only_first_time_tomorrow"
+
+            response = {
+                "status": status,
+                "date": f"{day} {MONTHS_RU[month_num]}",
+                "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+                "specialist_name": specialist_name,
+                "weekday": WEEKDAYS_RU[weekday_idx],
+                "weekday_kz": WEEKDAYS_KZ[weekday_idx],
+                "first_time": clean_times[0]
+            }
+
+            if relation == "today":
+                response["day"] = "сегодня"
+                response["day_kz"] = "бүгін"
+            elif relation == "tomorrow":
+                response["day"] = "завтра"
+                response["day_kz"] = "ертең"
+
+            return response
+
+        elif len(clean_times) == 2:
+            status = "only_two_time"
+            if relation == "today":
+                status = "only_two_time_today"
+            elif relation == "tomorrow":
+                status = "only_two_time_tomorrow"
+
+            response = {
+                "status": status,
+                "date": f"{day} {MONTHS_RU[month_num]}",
+                "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+                "specialist_name": specialist_name,
+                "weekday": WEEKDAYS_RU[weekday_idx],
+                "weekday_kz": WEEKDAYS_KZ[weekday_idx],
+                "first_time": clean_times[0],
+                "second_time": clean_times[1]
+            }
+
+            if relation == "today":
+                response["day"] = "сегодня"
+                response["day_kz"] = "бүгін"
+            elif relation == "tomorrow":
+                response["day"] = "завтра"
+                response["day_kz"] = "ертең"
+
+            return response
+
+        else:  # 3 или более времен
+            status = "which_time"
+            if relation == "today":
+                status = "which_time_today"
+            elif relation == "tomorrow":
+                status = "which_time_tomorrow"
+
+            response = {
+                "status": status,
+                "date": f"{day} {MONTHS_RU[month_num]}",
+                "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+                "specialist_name": specialist_name,
+                "weekday": WEEKDAYS_RU[weekday_idx],
+                "weekday_kz": WEEKDAYS_KZ[weekday_idx],
+                "first_time": clean_times[0],
+                "second_time": clean_times[1],
+                "third_time": clean_times[2]
+            }
+
+            if relation == "today":
+                response["day"] = "сегодня"
+                response["day_kz"] = "бүгін"
+            elif relation == "tomorrow":
+                response["day"] = "завтра"
+                response["day_kz"] = "ертең"
+
+            return response
+
     except Exception as e:
-        logger.error(f"Error in process_which_time_response: {e}")
+        logger.error(f"Error in process_which_time_response: {e}", exc_info=True)
         return {
-            "status": "error",
+            "status": "error_med_element",
             "message": f"Ошибка при обработке ответа о доступном времени: {str(e)}"
         }
 
 
 def process_reserve_reception_response(response_data, date_obj, requested_time):
     """
-    Processes and transforms response from reserve_reception_for_patient function.
+    Обрабатывает и трансформирует ответ от функции reserve_reception_for_patient.
 
     Args:
-        response_data: Response data from reserve_reception_for_patient
-        date_obj: Date object for the appointment
-        requested_time: Time requested by user
+        response_data: Данные ответа от reserve_reception_for_patient
+        date_obj: Объект даты для записи
+        requested_time: Запрошенное время пользователем
 
     Returns:
-        dict: Formatted response
+        dict: Отформатированный ответ
     """
     try:
-        # Determine relation of date to current day
+        # Определяем отношение даты к текущему дню
         relation = get_date_relation(date_obj)
 
-        # Check response status
+        # Проверяем статус ответа
         status = response_data.get("status", "")
 
-        # Extract specialist name
+        # Извлекаем имя специалиста
         specialist_name = response_data.get("specialist_name", "Специалист")
 
-        # Special handling for successful booking with success status prefix
+        # Форматируем информацию о дате
+        day = date_obj.day
+        month_num = date_obj.month
+        weekday_idx = date_obj.weekday()
+
+        # Особая обработка для успешного бронирования с префиксом успешного статуса
         if status in ["success", "success_schedule", "success_change_reception"] or status.startswith(
                 "success_change_reception"):
             time = response_data.get("time", requested_time)
-            return format_success_scheduling_response(time, date_obj, specialist_name, relation)
 
-        # If requested time is taken and alternatives are suggested
+            # Нормализуем формат времени
+            if isinstance(time, str):
+                # Если время в формате "YYYY-MM-DD HH:MM:SS"
+                if " " in time and len(time) > 10:
+                    time = time.split(" ")[1]  # Берем только часть времени
+
+                # Если время содержит секунды (HH:MM:SS), удаляем их
+                if time.count(":") == 2:
+                    time = ":".join(time.split(":")[:2])
+
+            success_status = "success_change_reception"
+            if relation == "today":
+                success_status = "success_change_reception_today"
+            elif relation == "tomorrow":
+                success_status = "success_change_reception_tomorrow"
+
+            response = {
+                "status": success_status,
+                "date": f"{day} {MONTHS_RU[month_num]}",
+                "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+                "specialist_name": specialist_name,
+                "weekday": WEEKDAYS_RU[weekday_idx],
+                "weekday_kz": WEEKDAYS_KZ[weekday_idx],
+                "time": time
+            }
+
+            if relation == "today":
+                response["day"] = "сегодня"
+                response["day_kz"] = "бүгін"
+            elif relation == "tomorrow":
+                response["day"] = "завтра"
+                response["day_kz"] = "ертең"
+
+            return response
+
+        # Если запрошенное время занято и предлагаются альтернативы
         elif status in ["suggest_times", "error_change_reception"] or status.startswith(
                 "error_change_reception") or status.startswith("change_only_"):
             available_times = []
 
-            # Check different field variants with times
+            # Проверяем разные варианты полей с временами
             if "suggested_times" in response_data and isinstance(response_data["suggested_times"], list):
                 available_times = response_data["suggested_times"]
-                # Extract only time from "YYYY-MM-DD HH:MM" format
+                # Извлекаем только время из формата "YYYY-MM-DD HH:MM"
                 available_times = [t.split(" ")[1] if " " in t else t for t in available_times]
             elif "all_available_times" in response_data and isinstance(response_data["all_available_times"], list):
                 available_times = response_data["all_available_times"]
-                # Extract only time from "YYYY-MM-DD HH:MM" format
+                # Извлекаем только время из формата "YYYY-MM-DD HH:MM"
                 available_times = [t.split(" ")[1] if " " in t else t for t in available_times]
             else:
-                # Check first_time, second_time, third_time fields
+                # Проверяем first_time, second_time, third_time
                 for key in ["first_time", "second_time", "third_time"]:
                     if key in response_data and response_data[key]:
                         available_times.append(response_data[key])
 
-                # Check time_1, time_2, time_3... fields
+                # Проверяем time_1, time_2, time_3...
                 for i in range(1, 10):
                     key = f"time_{i}"
                     if key in response_data and response_data[key]:
                         available_times.append(response_data[key])
 
-            # Remove seconds if present
-            available_times = [":".join(t.split(":")[:2]) if t.count(":") == 2 else t for t in available_times]
+            # Удаляем секунды, если они есть
+            clean_times = []
+            for t in available_times:
+                if isinstance(t, str):
+                    if t.count(":") == 2:  # Формат: "HH:MM:SS"
+                        clean_times.append(":".join(t.split(":")[:2]))
+                    else:
+                        clean_times.append(t)
 
-            # Automatic booking attempt for first available time
-            if available_times and requested_time == "10:00" and "перенес" in response_data.get("message", "").lower():
-                logger.info(f"Automatic booking attempt for first available time: {available_times[0]}")
+            # Автоматическая попытка бронирования для первого доступного времени
+            if clean_times and requested_time == "10:00" and "перенес" in response_data.get("message", "").lower():
+                logger.info(f"Automatic booking attempt for first available time: {clean_times[0]}")
 
-                # Format date and time for new attempt
-                if " " in available_times[0]:
-                    time_only = available_times[0].split(" ")[1]
+                # Форматируем дату и время для новой попытки
+                if " " in clean_times[0]:
+                    time_only = clean_times[0].split(" ")[1]
                 else:
-                    time_only = available_times[0]
+                    time_only = clean_times[0]
 
                 new_datetime = f"{date_obj.strftime('%Y-%m-%d')} {time_only}"
 
-                # Attempt new booking
+                # Пытаемся сделать новое бронирование
                 result = reserve_reception_for_patient(
                     patient_id=response_data.get("patient_id", ""),
                     date_from_patient=new_datetime,
                     trigger_id=1
                 )
 
-                # Process result
+                # Обрабатываем результат
                 if isinstance(result, dict):
                     if result.get("status") in ["success_schedule", "success_change_reception"] or result.get(
                             "status").startswith("success_change_reception"):
-                        return format_success_scheduling_response(time_only, date_obj, specialist_name, relation)
-                elif hasattr(result, 'content'):
-                    result_dict = json.loads(result.content.decode('utf-8'))
-                    if result_dict.get("status") in ["success_schedule", "success_change_reception"] or result_dict.get(
-                            "status").startswith("success_change_reception"):
-                        return format_success_scheduling_response(time_only, date_obj, specialist_name, relation)
+                        success_status = "success_change_reception"
+                        if relation == "today":
+                            success_status = "success_change_reception_today"
+                        elif relation == "tomorrow":
+                            success_status = "success_change_reception_tomorrow"
 
-            # If automatic attempt failed or wasn't made, return standard response
-            return format_error_scheduling_response(available_times, date_obj, specialist_name, relation)
+                        response = {
+                            "status": success_status,
+                            "date": f"{day} {MONTHS_RU[month_num]}",
+                            "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+                            "specialist_name": specialist_name,
+                            "weekday": WEEKDAYS_RU[weekday_idx],
+                            "weekday_kz": WEEKDAYS_KZ[weekday_idx],
+                            "time": time_only
+                        }
 
-        # If invalid date
+                        if relation == "today":
+                            response["day"] = "сегодня"
+                            response["day_kz"] = "бүгін"
+                        elif relation == "tomorrow":
+                            response["day"] = "завтра"
+                            response["day_kz"] = "ертең"
+
+                        return response
+
+            # Определяем статус ошибки в зависимости от количества альтернативных времен
+            if len(clean_times) == 0:
+                error_status = "error_change_reception_bad_date"
+                return {
+                    "status": error_status,
+                    "data": response_data.get("message", "Ошибка изменения даты приема")
+                }
+            elif len(clean_times) == 1:
+                error_status = "change_only_first_time"
+                if relation == "today":
+                    error_status = "change_only_first_time_today"
+                elif relation == "tomorrow":
+                    error_status = "change_only_first_time_tomorrow"
+
+                response = {
+                    "status": error_status,
+                    "date": f"{day} {MONTHS_RU[month_num]}",
+                    "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+                    "specialist_name": specialist_name,
+                    "weekday": WEEKDAYS_RU[weekday_idx],
+                    "weekday_kz": WEEKDAYS_KZ[weekday_idx],
+                    "first_time": clean_times[0]
+                }
+
+                if relation == "today":
+                    response["day"] = "сегодня"
+                    response["day_kz"] = "бүгін"
+                elif relation == "tomorrow":
+                    response["day"] = "завтра"
+                    response["day_kz"] = "ертең"
+
+                return response
+
+            elif len(clean_times) == 2:
+                error_status = "change_only_two_time"
+                if relation == "today":
+                    error_status = "change_only_two_time_today"
+                elif relation == "tomorrow":
+                    error_status = "change_only_two_time_tomorrow"
+
+                response = {
+                    "status": error_status,
+                    "date": f"{day} {MONTHS_RU[month_num]}",
+                    "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+                    "specialist_name": specialist_name,
+                    "weekday": WEEKDAYS_RU[weekday_idx],
+                    "weekday_kz": WEEKDAYS_KZ[weekday_idx],
+                    "first_time": clean_times[0],
+                    "second_time": clean_times[1]
+                }
+
+                if relation == "today":
+                    response["day"] = "сегодня"
+                    response["day_kz"] = "бүгін"
+                elif relation == "tomorrow":
+                    response["day"] = "завтра"
+                    response["day_kz"] = "ертең"
+
+                return response
+
+            else:  # 3 или более альтернативных времен
+                error_status = "error_change_reception"
+                if relation == "today":
+                    error_status = "error_change_reception_today"
+                elif relation == "tomorrow":
+                    error_status = "error_change_reception_tomorrow"
+
+                response = {
+                    "status": error_status,
+                    "date": f"{day} {MONTHS_RU[month_num]}",
+                    "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+                    "specialist_name": specialist_name,
+                    "weekday": WEEKDAYS_RU[weekday_idx],
+                    "weekday_kz": WEEKDAYS_KZ[weekday_idx],
+                    "first_time": clean_times[0],
+                    "second_time": clean_times[1],
+                    "third_time": clean_times[2]
+                }
+
+                if relation == "today":
+                    response["day"] = "сегодня"
+                    response["day_kz"] = "бүгін"
+                elif relation == "tomorrow":
+                    response["day"] = "завтра"
+                    response["day_kz"] = "ертең"
+
+                return response
+
+        # Если неверная дата
         elif status == "error_change_reception_bad_date":
             return {
                 "status": "error_change_reception_bad_date",
                 "data": response_data.get("message", "Ошибка изменения даты приема")
             }
 
-        # If non-working time
+        # Если нерабочее время
         elif status == "nonworktime":
             return {"status": "nonworktime"}
 
-        # If no slots
+        # Если нет слотов
         elif status.startswith("error_empty_windows"):
-            # Return response unchanged
+            # Возвращаем ответ без изменений
             return response_data
 
-        # Other errors
+        # Другие ошибки
         else:
             return {
                 "status": "error",
                 "message": response_data.get("message", "Произошла ошибка при обработке запроса")
             }
     except Exception as e:
-        logger.error(f"Error in process_reserve_reception_response: {e}")
+        logger.error(f"Error in process_reserve_reception_response: {e}", exc_info=True)
         return {
             "status": "error",
             "message": f"Ошибка при обработке ответа о записи/переносе: {str(e)}"
@@ -640,33 +916,33 @@ def process_reserve_reception_response(response_data, date_obj, requested_time):
 # Функция для обработки ответа от функции delete_reception_for_patient
 def process_delete_reception_response(response_data):
     """
-    Processes and transforms response from delete_reception_for_patient function.
+    Обрабатывает и трансформирует ответ от функции delete_reception_for_patient.
 
     Args:
-        response_data: Response data from delete_reception_for_patient
+        response_data: Данные ответа от delete_reception_for_patient
 
     Returns:
-        dict: Formatted response
+        dict: Отформатированный ответ
     """
     try:
-        # Check response status
+        # Проверяем статус ответа
         status = response_data.get("status", "")
 
-        # If deletion successful
+        # Если удаление успешно
         if status == "success_delete":
             return {
                 "status": "success_deleting_reception",
                 "message": "Запись успешно удалена"
             }
 
-        # If deletion error
+        # Если ошибка удаления
         else:
             return {
                 "status": "error_deleting_reception",
                 "message": response_data.get("message", "Ошибка при удалении записи")
             }
     except Exception as e:
-        logger.error(f"Error in process_delete_reception_response: {e}")
+        logger.error(f"Error in process_delete_reception_response: {e}", exc_info=True)
         return {
             "status": "error_deleting_reception",
             "message": f"Ошибка при обработке ответа об удалении записи: {str(e)}"
@@ -675,30 +951,30 @@ def process_delete_reception_response(response_data):
 
 def process_appointment_time_response(response_data):
     """
-    Processes and transforms response from appointment_time_for_patient function.
+    Обрабатывает и трансформирует ответ от функции appointment_time_for_patient.
 
     Args:
-        response_data: Response data from appointment_time_for_patient
+        response_data: Данные ответа от appointment_time_for_patient
 
     Returns:
-        dict: Formatted response
+        dict: Отформатированный ответ
     """
     try:
-        # Check if response already has a proper status
+        # Проверяем, имеет ли ответ уже правильный статус
         status = response_data.get("status", "")
 
-        # If it's a success appointment status, just ensure the format is correct
+        # Если это статус успешного приема, просто убеждаемся, что формат правильный
         if status == "success_appointment" or status == "success_appointment_from_db":
-            # Make sure all required fields are present
+            # Проверяем наличие всех необходимых полей
             required_fields = ["appointment_id", "appointment_time", "appointment_date", "doctor_name", "clinic_name"]
             for field in required_fields:
                 if field not in response_data:
                     return {
                         "status": "error",
-                        "message": f"Ответ не содержит обязательное поле: {field}"
+                        "message": f"В ответе отсутствует обязательное поле: {field}"
                     }
 
-            # Format the response in the standard format
+            # Преобразуем дату для правильного форматирования
             date_obj = None
             if "appointment_date" in response_data:
                 try:
@@ -707,29 +983,47 @@ def process_appointment_time_response(response_data):
                     pass
 
             if date_obj:
-                # Determine if today/tomorrow
+                # Определяем, сегодня/завтра или другой день
                 relation = get_date_relation(date_obj)
 
-                return format_success_scheduling_response(
-                    response_data["appointment_time"],
-                    date_obj,
-                    response_data["doctor_name"],
-                    relation
-                )
+                day = date_obj.day
+                month_num = date_obj.month
+                weekday_idx = date_obj.weekday()
 
-            # If couldn't parse date, just return the original response
+                status = "success_for_check_info"
+
+                response = {
+                    "status": status,
+                    "date": f"{day} {MONTHS_RU[month_num]}",
+                    "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+                    "specialist_name": response_data.get("doctor_name", "Специалист"),
+                    "weekday": WEEKDAYS_RU[weekday_idx],
+                    "weekday_kz": WEEKDAYS_KZ[weekday_idx],
+                    "time": response_data["appointment_time"]
+                }
+
+                if relation == "today":
+                    response["day"] = "сегодня"
+                    response["day_kz"] = "бүгін"
+                elif relation == "tomorrow":
+                    response["day"] = "завтра"
+                    response["day_kz"] = "ертең"
+
+                return response
+
+            # Если не удалось разобрать дату, просто возвращаем исходный ответ
             return response_data
 
-        # If it's an error status, just return the response
+        # Если это статус ошибки, просто возвращаем ответ
         elif status.startswith("error_"):
             return response_data
 
-        # For unknown statuses, return as is
+        # Для неизвестных статусов возвращаем как есть
         else:
             return response_data
 
     except Exception as e:
-        logger.error(f"Error in process_appointment_time_response: {e}")
+        logger.error(f"Error in process_appointment_time_response: {e}", exc_info=True)
         return {
             "status": "error",
             "message": f"Ошибка при обработке ответа о текущей записи: {str(e)}"
@@ -789,10 +1083,10 @@ def process_appointment_time_response(response_data):
 @require_http_methods(["POST"])
 def process_voicebot_request(request):
     """
-    Enhanced request handler for voice bot that ensures proper response formatting.
+    Обработчик запросов от голосового бота, обеспечивающий правильное форматирование ответов.
     """
     try:
-        # Parse request data
+        # Разбор данных запроса
         data = json.loads(request.body)
         appointment_id = data.get('appointment_id')
         user_input = data.get('user_input', '').strip()
@@ -810,7 +1104,7 @@ def process_voicebot_request(request):
                 'message': 'Missing required parameters: appointment_id and user_input'
             })
 
-        # Check if appointment exists
+        # Проверка наличия записи
         try:
             appointment = Appointment.objects.get(appointment_id=appointment_id)
             patient_code = appointment.patient.patient_code
@@ -821,7 +1115,7 @@ def process_voicebot_request(request):
                 'message': 'Appointment not active or not found'
             })
 
-        # Check if patient is in ignored list
+        # Проверка, находится ли пациент в игнорируемом списке
         if IgnoredPatient.objects.filter(patient_code=patient_code).exists():
             logger.warning(f"Patient {patient_code} is in ignored list")
             return JsonResponse({
@@ -829,126 +1123,18 @@ def process_voicebot_request(request):
                 'message': 'Patient is in ignored list'
             })
 
-        # Preprocess user input
+        # Предварительная обработка пользовательского ввода
         user_input = preprocess_input(user_input)
 
-        # Try direct function call first
-        # intent = determine_intent(user_input)
-        # logger.info(f"Determined intent: {intent}")
-
-        # Get current date information
-        today = datetime.now()
-        tomorrow = today + timedelta(days=1)
-
-        # Extract date information from input
-        target_date = None
-        if "завтра" in user_input.lower():
-            target_date = tomorrow
-        elif "сегодня" in user_input.lower():
-            target_date = today
-        else:
-            # Try to extract specific date (this is simplified)
-            # In a real system, you'd have more robust date parsing
-            target_date = tomorrow  # Default to tomorrow
-
-        date_str = target_date.strftime("%Y-%m-%d")
-
-        # Extract time information
-        time_pattern = r'(\d{1,2})[:\s](\d{2})'
-        time_match = re.search(time_pattern, user_input)
-        time_str = None
-
-        if time_match:
-            hour = int(time_match.group(1))
-            minute = int(time_match.group(2))
-            time_str = f"{hour:02d}:{minute:02d}"
-        else:
-            # Use time of day mentions
-            if any(word in user_input.lower() for word in ["утр", "утром", "рано"]):
-                time_str = "10:00"
-            elif any(word in user_input.lower() for word in ["обед", "днем", "полдень"]):
-                time_str = "13:00"
-            elif any(word in user_input.lower() for word in ["вечер", "вечером", "поздн"]):
-                time_str = "18:00"
-            else:
-                time_str = "10:00"  # Default
-
-        # Format date_time for API calls
-        date_time = f"{date_str} {time_str}"
-
-        # Direct function call based on intent
-        direct_result = None
-
-        # if intent == "check_times":
-        #     from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
-        #     direct_result = which_time_in_certain_day(patient_code, date_str)
-        #
-        #     # Process the response to ensure correct formatting
-        #     if hasattr(direct_result, 'content'):
-        #         result_dict = json.loads(direct_result.content.decode('utf-8'))
-        #         direct_result = process_which_time_response(result_dict, target_date)
-        #     else:
-        #         direct_result = process_which_time_response(direct_result, target_date)
-        #
-        # elif intent == "check_appointment":
-        #     from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
-        #     direct_result = appointment_time_for_patient(patient_code)
-        #
-        #     # Process the response to ensure correct formatting
-        #     if hasattr(direct_result, 'content'):
-        #         result_dict = json.loads(direct_result.content.decode('utf-8'))
-        #         direct_result = process_appointment_time_response(result_dict)
-        #     else:
-        #         direct_result = process_appointment_time_response(direct_result)
-        #
-        # elif intent in ["schedule", "reschedule"]:
-        #     from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import \
-        #         reserve_reception_for_patient
-        #     direct_result = reserve_reception_for_patient(patient_code, date_time, 1)
-        #
-        #     # Process the response to ensure correct formatting
-        #     if hasattr(direct_result, 'content'):
-        #         result_dict = json.loads(direct_result.content.decode('utf-8'))
-        #         direct_result = process_reserve_reception_response(result_dict, target_date, time_str)
-        #     else:
-        #         direct_result = process_reserve_reception_response(direct_result, target_date, time_str)
-        #
-        # elif intent == "delete":
-        #     from reminder.infoclinica_requests.schedule.delete_reception_for_patient import delete_reception_for_patient
-        #     direct_result = delete_reception_for_patient(patient_code)
-        #
-        #     # Process the response to ensure correct formatting
-        #     if hasattr(direct_result, 'content'):
-        #         result_dict = json.loads(direct_result.content.decode('utf-8'))
-        #         direct_result = process_delete_reception_response(result_dict)
-        #     else:
-        #         direct_result = process_delete_reception_response(direct_result)
-
-        # If direct function call succeeded with proper formatting
-        if direct_result and isinstance(direct_result, dict) and "status" in direct_result:
-            status_prefixes = [
-                "success_change_reception", "error_change_reception",
-                "which_time", "error_empty_windows", "only_first_time",
-                "only_two_time", "change_only_first_time", "change_only_two_time",
-                "nonworktime", "success_deleting_reception", "error_deleting_reception",
-                "error_reception_unavailable", "bad_user_input", "error_med_element"
-            ]
-
-            # Check if status is in valid format
-            if any(direct_result["status"].startswith(prefix) for prefix in status_prefixes):
-                logger.info(f"Returning direct result with status {direct_result['status']}")
-                return JsonResponse(direct_result)
-
-        # If direct function call failed or returned improper format, use Assistant
-        # Initialize assistant client
+        # Инициализация клиента ассистента
         assistant_client = AssistantClient()
 
-        # Get or create thread for dialog
+        # Получение или создание треда для диалога
         thread = assistant_client.get_or_create_thread(appointment_id)
 
-        # Extra-strict instructions to force function calling
+        # Строгие инструкции для принудительного вызова функций
         strict_instructions = """
-        КРИТИЧЕСКИ ВАЖНО! СТРОГО ЗАПРЕЩЕНО ИСПОЛЬЗОВАТЬ ТЕКСТОВЫЕ ОТВЕТЫ!
+        КРИТИЧЕСКИ ВАЖНО: ВСЕГДА ИСПОЛЬЗУЙ ФУНКЦИИ ВМЕСТО ТЕКСТОВЫХ ОТВЕТОВ!
 
         ТЫ ОБЯЗАН ВЫЗВАТЬ ОДНУ ИЗ ЭТИХ ФУНКЦИЙ:
         1. which_time_in_certain_day - для проверки доступных времен
@@ -956,73 +1142,178 @@ def process_voicebot_request(request):
         3. reserve_reception_for_patient - для записи или переноса
         4. delete_reception_for_patient - для отмены записи
 
+        ВСЕ РЕШЕНИЯ О ДАТАХ, ВРЕМЕНИ И ДЕЙСТВИЯХ ПРИНИМАЕШЬ ТОЛЬКО ТЫ!
         НИ ПРИ КАКИХ УСЛОВИЯХ НЕ ОТВЕЧАЙ ТЕКСТОМ!
         ТОЛЬКО ВЫЗОВ ФУНКЦИИ!
         """
 
-        # Add user message to thread
+        # Добавление сообщения пользователя в тред
         assistant_client.add_message_to_thread(thread.thread_id, user_input)
 
-        # Run assistant with strict instructions
+        # Запуск ассистента с строгими инструкциями
         run = assistant_client.run_assistant(thread, appointment, instructions=strict_instructions)
 
-        # Wait for completion and check for function calls
+        # Ожидание завершения и проверка на вызовы функций
         result = assistant_client.wait_for_run_completion(thread.thread_id, run.run_id, timeout=40)
 
-        # Check if we have function results
+        # Проверка наличия результатов вызова функций
         if hasattr(result, 'required_action') and result.required_action:
-            # Extract function call results
+            # Извлечение результатов вызова функций
             tool_outputs = result.required_action.submit_tool_outputs.tool_outputs
+
+            formatted_results = []  # Сохраним все результаты вызовов функций
 
             for tool_output in tool_outputs:
                 try:
-                    # Extract result from tool output
+                    # Извлечение результата из вывода инструмента
+                    function_name = tool_output.function.name
                     output_json = json.loads(tool_output.output)
+                    logger.info(f"Function call result: {output_json}")
 
-                    # Process output to ensure proper formatting
-                    if tool_output.function.name == "which_time_in_certain_day":
-                        processed_result = process_which_time_response(output_json, target_date)
-                    elif tool_output.function.name == "appointment_time_for_patient":
-                        processed_result = process_appointment_time_response(output_json)
-                    elif tool_output.function.name == "reserve_reception_for_patient":
-                        processed_result = process_reserve_reception_response(output_json, target_date, time_str)
-                    elif tool_output.function.name == "delete_reception_for_patient":
-                        processed_result = process_delete_reception_response(output_json)
+                    # Сохраняем результат
+                    formatted_results.append(output_json)
+
+                    # Обработка вывода для обеспечения правильного форматирования
+                    if function_name == "which_time_in_certain_day":
+                        formatted_result = process_which_time_response(output_json,
+                                                                       output_json.get("date_time",
+                                                                                       datetime.now().strftime(
+                                                                                           "%Y-%m-%d")))
+                    elif function_name == "appointment_time_for_patient":
+                        formatted_result = process_appointment_time_response(output_json)
+                    elif function_name == "reserve_reception_for_patient":
+                        date_str = output_json.get("date_from_patient", "")
+                        date_obj = None
+                        time_str = "10:00"
+
+                        if date_str:
+                            try:
+                                date_parts = date_str.split()
+                                date_obj = datetime.strptime(date_parts[0], "%Y-%m-%d")
+                                if len(date_parts) > 1:
+                                    time_str = date_parts[1]
+                            except ValueError:
+                                date_obj = datetime.now()
+                        else:
+                            date_obj = datetime.now()
+
+                        formatted_result = process_reserve_reception_response(output_json, date_obj, time_str)
+                    elif function_name == "delete_reception_for_patient":
+                        formatted_result = process_delete_reception_response(output_json)
                     else:
-                        processed_result = output_json
+                        formatted_result = output_json
 
-                    # Verify and return properly formatted response
-                    if isinstance(processed_result, dict) and "status" in processed_result:
+                    # Проверка и возврат правильно отформатированного ответа
+                    if isinstance(formatted_result, dict) and "status" in formatted_result:
                         status_prefixes = [
                             "success_change_reception", "error_change_reception",
                             "which_time", "error_empty_windows", "only_first_time",
                             "only_two_time", "change_only_first_time", "change_only_two_time",
-                            "nonworktime", "success_deleting_reception", "error_deleting_reception"
+                            "nonworktime", "success_deleting_reception", "error_deleting_reception",
+                            "error_reception_unavailable", "bad_user_input", "error_med_element",
+                            "success_for_check_info"
                         ]
 
-                        if any(processed_result["status"].startswith(prefix) for prefix in status_prefixes):
-                            logger.info(f"Returning processed function result with status {processed_result['status']}")
-                            return JsonResponse(processed_result)
+                        if any(formatted_result["status"].startswith(prefix) for prefix in status_prefixes):
+                            logger.info(f"Returning formatted function result with status {formatted_result['status']}")
+                            return JsonResponse(formatted_result)
+
                 except Exception as e:
                     logger.error(f"Error processing tool output: {e}")
 
-        # If we get here, try to extract function calls from assistant message
+            # Если есть результаты функций, но мы не вернули ответ выше,
+            # возвращаем первый результат (если он есть)
+            if formatted_results:
+                first_result = formatted_results[0]
+                if isinstance(first_result, dict):
+                    # Если в результате нет поля status, добавляем его
+                    if "status" not in first_result:
+                        # Определяем подходящий статус на основе содержимого
+                        if "first_time" in first_result:
+                            first_result["status"] = "which_time"
+                        elif "time" in first_result:
+                            first_result["status"] = "success_change_reception"
+                        else:
+                            first_result["status"] = "success_for_check_info"
+
+                    logger.info(
+                        f"Returning the first function result with status {first_result.get('status', 'unknown')}")
+                    return JsonResponse(first_result)
+
+            # Если мы дошли до этой точки, значит нужно отправить результаты функций
+            # и запросить завершение запуска
+            tool_output_list = []
+            for tool_output in tool_outputs:
+                tool_output_list.append({
+                    "tool_call_id": tool_output.id,
+                    "output": tool_output.output
+                })
+
+            # Отправляем результаты вызовов функций и ждем финальный ответ
+            assistant_client.client.beta.threads.runs.submit_tool_outputs(
+                thread_id=thread.thread_id,
+                run_id=run.run_id,
+                tool_outputs=tool_output_list
+            )
+
+            # Ждем завершения выполнения
+            final_result = assistant_client.wait_for_run_completion(thread.thread_id, run.run_id, timeout=30)
+
+            # Получаем последнее сообщение ассистента после обработки функций
+            latest_messages = assistant_client.get_messages(thread.thread_id, limit=1)
+            if latest_messages and len(latest_messages) > 0:
+                # Теперь нам нужно извлечь результат выполнения функции из метаданных запуска
+                try:
+                    # Ищем JSON в сообщении ассистента
+                    assistant_message = latest_messages[0].content[0].text.value
+                    logger.info(f"Final assistant message: {assistant_message}")
+
+                    # Пытаемся найти JSON в сообщении
+                    json_pattern = r'\{(?:[^{}]|"[^"]*"|\{(?:[^{}]|"[^"]*")*\})*\}'
+                    json_matches = re.findall(json_pattern, assistant_message, re.DOTALL)
+
+                    for json_match in json_matches:
+                        try:
+                            formatted_result = json.loads(json_match)
+                            if isinstance(formatted_result, dict) and "status" in formatted_result:
+                                status_prefixes = [
+                                    "success_change_reception", "error_change_reception",
+                                    "which_time", "error_empty_windows", "only_first_time",
+                                    "only_two_time", "change_only_first_time", "change_only_two_time",
+                                    "nonworktime", "success_deleting_reception", "error_deleting_reception"
+                                ]
+
+                                if any(formatted_result["status"].startswith(prefix) for prefix in status_prefixes):
+                                    logger.info(
+                                        f"Returning extracted JSON from final message with status {formatted_result['status']}")
+                                    return JsonResponse(formatted_result)
+                        except json.JSONDecodeError:
+                            continue
+                except Exception as e:
+                    logger.error(f"Error handling final assistant message: {e}")
+
+                # Если дошли до сюда, то пробуем вернуть первый результат функции снова
+                if formatted_results:
+                    logger.info(f"Returning first function result as backup")
+                    return JsonResponse(formatted_results[0])
+
+        # Если у нас нет результатов функций, пытаемся извлечь вызовы функций из сообщения ассистента
         messages = assistant_client.get_messages(thread.thread_id, limit=1)
 
         if messages and len(messages) > 0 and messages[0].role == "assistant":
-            # Get assistant message
+            # Получаем сообщение ассистента
             assistant_message = messages[0].content[0].text.value
             logger.info(f"Assistant message: {assistant_message}")
 
-            # Try to extract JSON response from message
+            # Пытаемся извлечь JSON-ответ из сообщения
             try:
                 json_pattern = r'\{(?:[^{}]|"[^"]*"|\{(?:[^{}]|"[^"]*")*\})*\}'
                 json_matches = re.findall(json_pattern, assistant_message, re.DOTALL)
 
                 for json_match in json_matches:
                     try:
-                        formatted_response = json.loads(json_match)
-                        if isinstance(formatted_response, dict) and "status" in formatted_response:
+                        formatted_result = json.loads(json_match)
+                        if isinstance(formatted_result, dict) and "status" in formatted_result:
                             status_prefixes = [
                                 "success_change_reception", "error_change_reception",
                                 "which_time", "error_empty_windows", "only_first_time",
@@ -1030,48 +1321,127 @@ def process_voicebot_request(request):
                                 "nonworktime", "success_deleting_reception", "error_deleting_reception"
                             ]
 
-                            if any(formatted_response["status"].startswith(prefix) for prefix in status_prefixes):
-                                logger.info(f"Returning extracted JSON with status {formatted_response['status']}")
-                                return JsonResponse(formatted_response)
+                            if any(formatted_result["status"].startswith(prefix) for prefix in status_prefixes):
+                                logger.info(f"Returning extracted JSON with status {formatted_result['status']}")
+                                return JsonResponse(formatted_result)
                     except json.JSONDecodeError:
                         continue
             except Exception as e:
                 logger.error(f"Error extracting JSON from response: {e}")
 
-        # # If all else fails, create a properly formatted response based on intent
-        # if intent == "check_times":
-        #     # Return available times response
-        #     available_times = ["10:00", "14:30", "16:00"]  # Placeholder times
-        #     formatted_response = format_available_times_response(target_date, available_times, "Специалист")
-        # elif intent == "check_appointment":
-        #     # Return current appointment info
-        #     formatted_response = {
-        #         "status": "success_for_check_info",
-        #         "date": f"{target_date.day} {MONTHS_RU[target_date.month]}",
-        #         "date_kz": f"{target_date.day} {MONTHS_KZ[target_date.month]}",
-        #         "specialist_name": "Специалист",
-        #         "weekday": WEEKDAYS_RU[target_date.weekday()],
-        #         "weekday_kz": WEEKDAYS_KZ[target_date.weekday()],
-        #         "time": "15:00"
-        #     }
-        # elif intent in ["schedule", "reschedule"]:
-        #     # Return booking response
-        #     formatted_response = format_booking_response(target_date, time_str, "Специалист")
-        # elif intent == "delete":
-        #     # Return deletion response
-        #     formatted_response = {
-        #         "status": "success_deleting_reception",
-        #         "message": "Запись успешно удалена"
-        #     }
-        else:
-            # Fallback response
-            formatted_response = {
-                "status": "error_med_element",
-                "message": "Не удалось определить тип запроса"
-            }
+        # Если у нас нет результатов функций, но есть сообщение от ассистента,
+        # пытаемся извлечь намерение из его текстового ответа
+        messages = assistant_client.get_messages(thread.thread_id, limit=1)
 
-        logger.info(f"Returning fallback formatted response with status {formatted_response['status']}")
-        return JsonResponse(formatted_response)
+        if messages and len(messages) > 0 and messages[0].role == "assistant":
+            # Получаем сообщение ассистента
+            assistant_message = messages[0].content[0].text.value
+            logger.info(f"Assistant message: {assistant_message}")
+
+            # Пытаемся извлечь намерение из текстового ответа
+            extracted_response = extract_intent_from_assistant_message(
+                assistant_message, appointment_id, patient_code
+            )
+
+            if extracted_response and isinstance(extracted_response, dict) and "status" in extracted_response:
+                logger.info(f"Extracted intent from assistant message: {extracted_response['status']}")
+                return JsonResponse(extracted_response)
+
+            # Если в сообщении ассистента есть перечисление времён, это ответ на запрос о свободных окошках
+            if re.search(r'- \d+:\d+', assistant_message):
+                # Попробуем определить дату из сообщения
+                date_match = re.search(r'на (\d+) ([а-яА-Я]+)', assistant_message)
+
+                if date_match:
+                    day = int(date_match.group(1))
+                    month_name = date_match.group(2)
+
+                    # Определяем месяц
+                    month_num = datetime.now().month  # По умолчанию текущий месяц
+                    for num, name in MONTHS_RU.items():
+                        if name.lower().startswith(month_name.lower()) or month_name.lower().startswith(name.lower()):
+                            month_num = num
+                            break
+
+                    # Создаем дату
+                    try:
+                        date_obj = datetime(datetime.now().year, month_num, day)
+                    except ValueError:
+                        # Если неверная дата, используем завтрашний день
+                        date_obj = datetime.now() + timedelta(days=1)
+
+                    # Определяем день недели
+                    weekday_idx = date_obj.weekday()
+
+                    # Извлекаем времена
+                    times = re.findall(r'- (\d+:\d+)', assistant_message)
+
+                    relation = None
+                    today = datetime.now().date()
+                    tomorrow = today + timedelta(days=1)
+
+                    if date_obj.date() == today:
+                        relation = "today"
+                    elif date_obj.date() == tomorrow:
+                        relation = "tomorrow"
+
+                    # Форматируем ответ в соответствии с API
+                    response = format_available_times_response(times, date_obj, "Специалист", relation)
+                    return JsonResponse(response)
+
+            # Пытаемся еще раз поискать JSON в сообщении ассистента
+            try:
+                json_pattern = r'\{(?:[^{}]|"[^"]*"|\{(?:[^{}]|"[^"]*")*\})*\}'
+                json_matches = re.findall(json_pattern, assistant_message, re.DOTALL)
+
+                for json_match in json_matches:
+                    try:
+                        formatted_result = json.loads(json_match)
+                        if isinstance(formatted_result, dict) and "status" in formatted_result:
+                            return JsonResponse(formatted_result)
+                    except json.JSONDecodeError:
+                        continue
+            except Exception as e:
+                logger.error(f"Error extracting JSON from response (second attempt): {e}")
+
+        # Если всё иное не удалось, пробуем вызвать функцию напрямую на основе текста запроса
+        if "свобод" in user_input.lower() or "окошк" in user_input.lower() or "доступн" in user_input.lower():
+            # Определяем дату из запроса
+            if "послезавтра" in user_input.lower() or "после завтра" in user_input.lower():
+                date_obj = datetime.now() + timedelta(days=2)
+            elif "завтра" in user_input.lower():
+                date_obj = datetime.now() + timedelta(days=1)
+            elif "сегодня" in user_input.lower():
+                date_obj = datetime.now()
+            else:
+                # По умолчанию завтра
+                date_obj = datetime.now() + timedelta(days=1)
+
+            date_str = date_obj.strftime("%Y-%m-%d")
+
+            # Вызываем функцию напрямую
+            try:
+                from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
+                result = which_time_in_certain_day(patient_code, date_str)
+
+                if hasattr(result, 'content'):
+                    result_dict = json.loads(result.content.decode('utf-8'))
+                    processed_result = process_which_time_response(result_dict, date_obj)
+                    return JsonResponse(processed_result)
+                else:
+                    processed_result = process_which_time_response(result, date_obj)
+                    return JsonResponse(processed_result)
+            except Exception as e:
+                logger.error(f"Error calling which_time_in_certain_day directly: {e}", exc_info=True)
+
+        # Если все методы не сработали, вернем базовый резервный ответ
+        fallback_response = {
+            "status": "error_med_element",
+            "message": "Не удалось определить тип запроса"
+        }
+
+        logger.info(f"Returning fallback response with status {fallback_response['status']}")
+        return JsonResponse(fallback_response)
 
     except json.JSONDecodeError:
         logger.error("Invalid JSON format in request")
@@ -1370,3 +1740,126 @@ def try_direct_function_call(user_input: str, appointment) -> dict:
 
     # In other cases - delegate to assistant
     return None
+
+
+def extract_intent_from_assistant_message(message, appointment_id, patient_code):
+    """
+    Извлекает намерение из текстового ответа ассистента и преобразует его в правильный формат API
+
+    Args:
+        message: Текстовое сообщение от ассистента
+        appointment_id: ID записи
+        patient_code: ID пациента
+
+    Returns:
+        dict: Отформатированный ответ в соответствии с API
+    """
+    try:
+        # Извлекаем дату из сообщения
+        date_match = re.search(r'на (\d+) ([а-яА-Я]+) \(([а-яА-Я]+)\)', message)
+        if date_match:
+            day = int(date_match.group(1))
+            month_name = date_match.group(2)
+            weekday_name = date_match.group(3)
+
+            # Определяем номер месяца по имени
+            month_num = None
+            for num, name in MONTHS_RU.items():
+                if name.lower() == month_name.lower():
+                    month_num = num
+                    break
+
+            if month_num is None:
+                # Если не нашли точное совпадение, пробуем поискать частичное
+                for num, name in MONTHS_RU.items():
+                    if name.lower().startswith(month_name.lower()) or month_name.lower().startswith(name.lower()):
+                        month_num = num
+                        break
+
+            if month_num is None:
+                # Если все еще не нашли, используем текущий месяц
+                month_num = datetime.now().month
+
+            # Определяем год (предполагаем текущий год)
+            year = datetime.now().year
+
+            # Создаем объект datetime
+            try:
+                date_obj = datetime(year, month_num, day)
+            except ValueError:
+                # Если неверная дата, используем завтрашний день
+                date_obj = datetime.now() + timedelta(days=2)
+
+            # Проверяем, является ли дата послезавтрашней
+            today = datetime.now()
+            day_after_tomorrow = (today + timedelta(days=2)).date()
+
+            # Извлекаем времена из сообщения
+            time_matches = re.findall(r'- (\d+:\d+)', message)
+            available_times = time_matches[:3]  # Берем только первые три времени
+
+            # Форматируем ответ в соответствии с API
+            response = {
+                "status": "which_time",
+                "date": f"{day} {MONTHS_RU[month_num]}",
+                "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+                "specialist_name": "Специалист",
+                "weekday": weekday_name.capitalize(),
+                "weekday_kz": next((kz for ru, kz in zip(WEEKDAYS_RU.values(), WEEKDAYS_KZ.values())
+                                    if ru.lower() == weekday_name.lower()), "Белгісіз күн")
+            }
+
+            # Добавляем доступные времена
+            if len(available_times) >= 1:
+                response["first_time"] = available_times[0]
+            if len(available_times) >= 2:
+                response["second_time"] = available_times[1]
+            if len(available_times) >= 3:
+                response["third_time"] = available_times[2]
+
+            return response
+
+        # Если это сообщение о текущей записи
+        if "запись" in message.lower() and any(word in message.lower() for word in ["на", "в", "к", "время"]):
+            # Пытаемся вызвать функцию напрямую
+            from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
+            result = appointment_time_for_patient(patient_code)
+
+            if isinstance(result, dict) and "status" in result:
+                return result
+            elif hasattr(result, 'content'):
+                return json.loads(result.content.decode('utf-8'))
+
+            # Если не удалось получить результат, возвращаем общий ответ
+            return {
+                "status": "error_reception_unavailable",
+                "message": "Не удалось получить информацию о записи"
+            }
+
+        # Если это сообщение о свободных окошках, но без точной даты
+        if "свободн" in message.lower() and "окошк" in message.lower():
+            # Используем завтрашний день по умолчанию
+            tomorrow = datetime.now() + timedelta(days=1)
+            date_str = tomorrow.strftime("%Y-%m-%d")
+
+            # Вызываем функцию напрямую
+            from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
+            result = which_time_in_certain_day(patient_code, date_str)
+
+            if isinstance(result, dict) and "status" in result:
+                return result
+            elif hasattr(result, 'content'):
+                return json.loads(result.content.decode('utf-8'))
+
+        # По умолчанию возвращаем ошибку
+        return {
+            "status": "error_med_element",
+            "message": "Не удалось определить намерение из ответа ассистента"
+        }
+
+    except Exception as e:
+        logger.error(f"Error extracting intent from assistant message: {e}", exc_info=True)
+        return {
+            "status": "error_med_element",
+            "message": "Ошибка при анализе ответа ассистента"
+        }
