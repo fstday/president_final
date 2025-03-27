@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -23,162 +23,171 @@ from reminder.openai_assistant.assistant_client import AssistantClient
 @require_http_methods(["POST"])
 def process_voicebot_request(request):
     """
-    Processes request from the ACS voice robot.
+    Улучшенная функция обработки запросов от голосового робота ACS.
 
-    Expects JSON with fields:
-    - appointment_id: Appointment ID
-    - user_input: Text input from user
+    Ожидает JSON с полями:
+    - appointment_id: ID записи на прием
+    - user_input: Текст от пользователя
 
-    Returns:
-    - JSON with formatted response according to documentation
+    Возвращает:
+    - JSON с форматированным ответом согласно документации
     """
     try:
-        # Parse request data
+        # Разбор данных запроса
         data = json.loads(request.body)
         appointment_id = data.get('appointment_id')
         user_input = data.get('user_input')
 
         logger.info(f"\n\n=================================================\n\n"
-                    f"Beginning of request: "
+                    f"Начало запроса: "
                     f"appointment_id={appointment_id}, "
                     f"user_input='{user_input}'"
                     f"\n\n=================================================\n\n")
 
         if not appointment_id or not user_input:
-            logger.warning("Missing required parameters")
+            logger.warning("Отсутствуют обязательные параметры")
             return JsonResponse({
                 'status': 'error_bad_input',
-                'message': 'Missing required parameters: appointment_id and user_input'
+                'message': 'Отсутствуют обязательные параметры: appointment_id и user_input'
             }, status=400)
 
-        # Check if appointment exists
+        # Проверяем существование записи
         try:
             appointment = Appointment.objects.get(appointment_id=appointment_id)
         except Appointment.DoesNotExist:
-            logger.error(f"Appointment {appointment_id} not found")
+            logger.error(f"Запись {appointment_id} не найдена")
             return JsonResponse({
                 'status': 'error_reception_unavailable',
-                'message': 'Appointment not active or not found'
+                'message': 'Запись не активна или не найдена'
             }, status=404)
 
-        # Check if patient is on ignore list
+        # Проверяем, находится ли пациент в списке игнорируемых
         if IgnoredPatient.objects.filter(patient_code=appointment.patient.patient_code).exists():
-            logger.warning(f"Patient {appointment.patient.patient_code} is on ignore list")
+            logger.warning(f"Пациент {appointment.patient.patient_code} находится в списке игнорируемых")
             return JsonResponse({
                 'status': 'error_ignored_patient',
-                'message': f'Patient with code {appointment.patient.patient_code} is on ignore list.'
+                'message': f'Пациент с кодом {appointment.patient.patient_code} находится в списке игнорируемых.'
             }, status=403)
 
-        # Initialize assistant client
+        # Предварительная обработка запроса пользователя
+        user_input = preprocess_user_input(user_input)
+
+        # Прямое определение и вызов функций для специфических запросов
+        direct_function_result = try_direct_function_call(user_input, appointment)
+        if direct_function_result:
+            logger.info(f"Прямой вызов функции выполнен успешно, возвращаем результат")
+            return JsonResponse(direct_function_result)
+
+        # Инициализируем клиент ассистента
         assistant_client = AssistantClient()
 
-        # Get or create thread for dialogue
+        # Получаем или создаем тред для диалога
         thread = assistant_client.get_or_create_thread(appointment_id)
 
-        # If there's a running process that's not complete, wait for it to finish
+        # Если есть незавершенный запуск, ждем его завершения
         if thread.current_run and thread.current_run.status not in ['completed', 'failed', 'cancelled', 'expired']:
-            logger.info(f"Waiting for previous run {thread.current_run.run_id} to complete")
+            logger.info(f"Ожидаем завершения предыдущего запуска {thread.current_run.run_id}")
             run_status = assistant_client.wait_for_run_completion(
                 thread_id=thread.thread_id,
                 run_id=thread.current_run.run_id
             )
-            logger.info(f"Previous run completed with status: {run_status}")
+            logger.info(f"Предыдущий запуск завершен со статусом: {run_status}")
 
-        # Add user message to thread
+        # Добавляем сообщение пользователя в тред
         assistant_client.add_message_to_thread(thread.thread_id, user_input)
 
-        # Run assistant
-        logger.info(f"Starting new assistant run for thread {thread.thread_id}")
+        # Запускаем ассистента
+        logger.info(f"Запускаем нового ассистента для треда {thread.thread_id}")
         run = assistant_client.run_assistant(thread, appointment)
 
-        # Wait for run to complete
+        # Ждем завершения запуска
         run_status = assistant_client.wait_for_run_completion(
             thread_id=thread.thread_id,
             run_id=run.run_id,
-            timeout=60  # 60 seconds timeout
+            timeout=60  # 60 секунд таймаут
         )
-        logger.info(f"Assistant run completed with status: {run_status}")
+        logger.info(f"Запуск ассистента завершен со статусом: {run_status}")
 
-        # Get latest assistant message
+        # Получаем последнее сообщение ассистента
         messages = assistant_client.get_messages(thread.thread_id, limit=1)
         if not messages:
-            logger.error("No response received from assistant")
+            logger.error("Нет ответа от ассистента")
             return JsonResponse({
                 'status': 'error',
-                'message': 'Failed to get response from assistant'
+                'message': 'Не удалось получить ответ от ассистента'
             }, status=500)
 
-        # Extract response text
+        # Извлекаем текст ответа
         assistant_message = messages[0]
         response_text = ""
 
-        # OpenAI may return content in different formats
+        # OpenAI может возвращать контент в разных форматах
         if assistant_message.content:
             for content_part in assistant_message.content:
                 if content_part.type == 'text':
                     response_text += content_part.text.value
 
-        logger.info(f"Raw assistant response: {response_text[:500]}...")  # Log first 500 chars
+        logger.info(f"Сырой ответ ассистента: {response_text[:500]}...")  # Логируем первые 500 символов
 
-        # Try to find and extract JSON object from text
+        # Пытаемся найти и извлечь JSON объект из текста
         try:
-            # Use regex to find JSON object in text
+            # Используем регулярное выражение для поиска JSON объекта в тексте
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
 
             if json_match:
                 json_str = json_match.group(0)
                 response_data = json.loads(json_str)
 
-                # If response has status field, it's a valid response
+                # Если в ответе есть поле status, это валидный ответ
                 if 'status' in response_data:
-                    # Format response according to documentation
+                    # Форматируем ответ согласно документации
                     formatted_response = format_response(response_data['status'], response_data)
-                    logger.info(f"Returning formatted response: {formatted_response}")
+                    logger.info(f"Возвращаем форматированный ответ: {formatted_response}")
                     return JsonResponse(formatted_response)
 
-            # Special handling for requests about available time slots
+            # Специальная обработка запросов о доступных временных слотах
             if "свободные окошки" in user_input.lower() or "когда можно записаться" in user_input.lower():
-                # If the assistant didn't call the correct function, we'll do it directly
-                logger.warning("Assistant failed to call which_time_in_certain_day function, calling it directly")
+                # Если ассистент не вызвал правильную функцию, вызываем ее напрямую
+                logger.warning("Ассистент не вызвал функцию which_time_in_certain_day, вызываем ее напрямую")
 
                 from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
 
-                # Determine if the query is for today
+                # Определяем, для какого дня нужны слоты
                 today = datetime.now().strftime("%Y-%m-%d")
                 response = which_time_in_certain_day(appointment.patient.patient_code, today)
 
-                # Convert JsonResponse to dict if needed
+                # Преобразуем JsonResponse в dict при необходимости
                 if hasattr(response, 'content'):
                     return response
                 else:
                     return JsonResponse(response)
 
-            # If no JSON and no special handling, return the text response
-            logger.info("No valid JSON found in response, returning text")
+            # Если нет JSON и нет специальной обработки, возвращаем текстовый ответ
+            logger.info("JSON не найден в ответе, возвращаем текст")
             return JsonResponse({
                 'status': 'assistant_response',
                 'message': response_text.strip()
             })
 
         except Exception as e:
-            logger.error(f"Error parsing assistant response: {e}", exc_info=True)
-            # In case of error parsing JSON, return text response
+            logger.error(f"Ошибка при обработке ответа ассистента: {e}", exc_info=True)
+            # В случае ошибки разбора JSON, возвращаем текстовый ответ
             return JsonResponse({
                 'status': 'assistant_response',
                 'message': response_text.strip()
             })
 
     except json.JSONDecodeError:
-        logger.error("Invalid JSON format in request")
+        logger.error("Неверный формат JSON в запросе")
         return JsonResponse({
             'status': 'error_bad_input',
-            'message': 'Invalid JSON format'
+            'message': 'Неверный формат JSON'
         }, status=400)
     except Exception as e:
-        logger.error(f"Error processing request: {e}", exc_info=True)
+        logger.error(f"Ошибка обработки запроса: {e}", exc_info=True)
         return JsonResponse({
             'status': 'error',
-            'message': f'Error processing request: {str(e)}'
+            'message': f'Ошибка обработки запроса: {str(e)}'
         }, status=500)
 
 
@@ -310,3 +319,110 @@ def get_assistant_info(request):
             'status': 'error',
             'message': f'Ошибка получения информации об ассистентах: {str(e)}'
         }, status=500)
+
+
+def preprocess_user_input(text: str) -> str:
+    """
+    Предварительная обработка текста запроса пользователя.
+
+    Args:
+        text: Текст запроса пользователя
+
+    Returns:
+        str: Обработанный текст
+    """
+    # Удаляем лишние пробелы
+    text = text.strip()
+
+    # Нормализуем упоминания дат
+    text = text.lower().replace('сегодняшний день', 'сегодня')
+    text = text.replace('завтрашний день', 'завтра')
+    text = text.replace('следующий день', 'завтра')
+
+    # Нормализуем упоминания времени суток
+    time_replacements = {
+        'в утреннее время': 'утром',
+        'ранним утром': 'утром',
+        'с утра пораньше': 'утром',
+        'в обеденное время': 'в обед',
+        'во время обеда': 'в обед',
+        'ближе к обеду': 'в обед',
+        'вечернее время': 'вечером',
+        'поздним вечером': 'вечером',
+        'ближе к вечеру': 'вечером'
+    }
+
+    for original, replacement in time_replacements.items():
+        text = text.replace(original, replacement)
+
+    return text
+
+
+def try_direct_function_call(user_input: str, appointment) -> dict:
+    """
+    Пытается напрямую определить и вызвать нужную функцию для определенных типов запросов.
+
+    Args:
+        user_input: Запрос пользователя
+        appointment: Объект записи на прием
+
+    Returns:
+        dict: Результат вызова функции или None, если прямой вызов невозможен
+    """
+    user_input = user_input.lower()
+    patient_code = appointment.patient.patient_code
+
+    # Импортируем функции
+    from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
+    from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
+    from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import reserve_reception_for_patient
+    from reminder.infoclinica_requests.schedule.delete_reception_for_patient import delete_reception_for_patient
+
+    # 1. Запрос текущей записи
+    if any(phrase in user_input for phrase in [
+        'когда у меня запись', 'на какое время я записан', 'когда мой прием',
+        'на какое время моя запись', 'когда мне приходить'
+    ]):
+        logger.info("Прямой вызов функции appointment_time_for_patient")
+        result = appointment_time_for_patient(patient_code)
+        # Преобразуем JsonResponse в dict при необходимости
+        if hasattr(result, 'content'):
+            return json.loads(result.content.decode('utf-8'))
+        return result
+
+    # 2. Запрос на отмену записи
+    if any(phrase in user_input for phrase in [
+        'отмени', 'отменить', 'удали', 'удалить', 'убрать запись',
+        'не хочу приходить', 'отказаться от записи'
+    ]):
+        logger.info("Прямой вызов функции delete_reception_for_patient")
+        result = delete_reception_for_patient(patient_code)
+        # Преобразуем JsonResponse в dict при необходимости
+        if hasattr(result, 'content'):
+            return json.loads(result.content.decode('utf-8'))
+        return result
+
+    # 3. Запрос доступных времен
+    if any(phrase in user_input for phrase in [
+        'свободные окошки', 'доступное время', 'какие времена', 'когда можно записаться',
+        'доступные времена', 'свободное время', 'когда свободно'
+    ]):
+        logger.info("Прямой вызов функции which_time_in_certain_day")
+
+        # Определяем, для какой даты нужны слоты
+        if 'завтра' in user_input:
+            date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        elif 'сегодня' in user_input:
+            date = datetime.now().strftime("%Y-%m-%d")
+        else:
+            # По умолчанию - сегодня
+            date = datetime.now().strftime("%Y-%m-%d")
+
+        result = which_time_in_certain_day(patient_code, date)
+        # Преобразуем JsonResponse в dict при необходимости
+        if hasattr(result, 'content'):
+            return json.loads(result.content.decode('utf-8'))
+        return result
+
+    # В остальных случаях используем ассистента
+    return None
