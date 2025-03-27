@@ -277,6 +277,8 @@ class AssistantClient:
                 logger.info(f"Обнаружено {len(tool_calls)} вызовов функций")
 
                 tool_outputs = []
+                formatted_results = []
+
                 for tool_call in tool_calls:
                     function_name = tool_call.function.name
                     function_args = json.loads(tool_call.function.arguments)
@@ -291,6 +293,9 @@ class AssistantClient:
                     formatted_result = self._format_for_acs(function_name, function_args, raw_result)
                     logger.info(f"Отформатированный результат для ACS: {formatted_result}")
 
+                    # Сохраняем форматированный результат
+                    formatted_results.append(formatted_result)
+
                     tool_outputs.append({
                         "tool_call_id": tool_call.id,
                         "output": json.dumps(formatted_result)
@@ -304,7 +309,10 @@ class AssistantClient:
                         tool_outputs=tool_outputs
                     )
                     logger.info(f"Отправлено {len(tool_outputs)} результатов функций для запуска {run_id}")
-                    return tool_outputs
+                    # Store the formatted results in run's metadata if available
+                    if hasattr(run, 'metadata'):
+                        run.metadata['formatted_results'] = formatted_results
+                    return formatted_results
                 else:
                     logger.warning("Нет результатов функций для отправки")
                     return []
@@ -317,153 +325,142 @@ class AssistantClient:
 
     def _format_for_acs(self, function_name: str, function_args: dict, result: dict) -> dict:
         """
-        Форматирует результаты функций в соответствии с требованиями ACS.
-
-        Args:
-            function_name: Имя вызванной функции
-            function_args: Аргументы функции
-            result: Исходный результат функции
-
-        Returns:
-            dict: Отформатированный результат
+        Formats function results for ACS according to required status formats.
         """
-
-        # Вспомогательные функции для форматирования
-        def get_date_relation(date_str):
-            """Определяет отношение даты к текущему дню (сегодня/завтра/другое)"""
-            try:
-                if date_str == "today":
-                    return "today"
-                if date_str == "tomorrow":
-                    return "tomorrow"
-
-                # Извлекаем часть даты, если есть время
-                if ' ' in date_str:
-                    date_str = date_str.split(' ')[0]
-
-                date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-                today = datetime.now().date()
-                tomorrow = today + timedelta(days=1)
-
-                if date_obj == today:
-                    return "today"
-                elif date_obj == tomorrow:
-                    return "tomorrow"
-                return None
-            except Exception:
-                return None
-
-        def format_date_info(date_str):
-            """Форматирует дату для ответа ACS"""
-            try:
-                # Парсим строку даты
-                if date_str == "today":
-                    date_obj = datetime.now()
-                elif date_str == "tomorrow":
-                    date_obj = datetime.now() + timedelta(days=1)
-                else:
-                    if ' ' in date_str:  # Есть время
-                        date_str = date_str.split(' ')[0]
-                    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-
-                # Соответствия месяцев
-                months_ru = {
-                    1: "Января", 2: "Февраля", 3: "Марта", 4: "Апреля", 5: "Мая", 6: "Июня",
-                    7: "Июля", 8: "Августа", 9: "Сентября", 10: "Октября", 11: "Ноября", 12: "Декабря"
-                }
-
-                months_kz = {
-                    1: "Қаңтар", 2: "Ақпан", 3: "Наурыз", 4: "Сәуір", 5: "Мамыр", 6: "Маусым",
-                    7: "Шілде", 8: "Тамыз", 9: "Қыркүйек", 10: "Қазан", 11: "Қараша", 12: "Желтоқсан"
-                }
-
-                weekdays_ru = {
-                    0: "Понедельник", 1: "Вторник", 2: "Среда",
-                    3: "Четверг", 4: "Пятница", 5: "Суббота", 6: "Воскресенье"
-                }
-
-                weekdays_kz = {
-                    0: "Дүйсенбі", 1: "Сейсенбі", 2: "Сәрсенбі",
-                    3: "Бейсенбі", 4: "Жұма", 5: "Сенбі", 6: "Жексенбі"
-                }
-
-                return {
-                    "date": f"{date_obj.day} {months_ru[date_obj.month]}",
-                    "date_kz": f"{date_obj.day} {months_kz[date_obj.month]}",
-                    "weekday": weekdays_ru[date_obj.weekday()],
-                    "weekday_kz": weekdays_kz[date_obj.weekday()],
-                }
-            except Exception as e:
-                logger.error(f"Ошибка форматирования даты: {e}")
-                return {
-                    "date": "Неизвестная дата",
-                    "date_kz": "Белгісіз күн",
-                    "weekday": "Неизвестный день",
-                    "weekday_kz": "Белгісіз күн",
-                }
-
         try:
-            # Значения по умолчанию
-            formatted = {
-                "status": "error",
-                "message": "Произошла неизвестная ошибка"
-            }
+            # Helper functions for formatting
+            def get_date_relation(date_str):
+                """Determines if date is today, tomorrow, or other"""
+                try:
+                    if date_str == "today":
+                        return "today"
+                    if date_str == "tomorrow":
+                        return "tomorrow"
 
-            # 1. which_time_in_certain_day - доступные слоты
+                    # Extract date part if time included
+                    if ' ' in date_str:
+                        date_str = date_str.split(' ')[0]
+
+                    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    today = datetime.now().date()
+                    tomorrow = today + timedelta(days=1)
+
+                    if date_obj == today:
+                        return "today"
+                    elif date_obj == tomorrow:
+                        return "tomorrow"
+                    return None
+                except Exception:
+                    return None
+
+            def format_date_info(date_str):
+                """Formats date for ACS response"""
+                try:
+                    # Parse date string
+                    if date_str == "today":
+                        date_obj = datetime.now()
+                    elif date_str == "tomorrow":
+                        date_obj = datetime.now() + timedelta(days=1)
+                    else:
+                        if ' ' in date_str:  # Has time
+                            date_str = date_str.split(' ')[0]
+                        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+
+                    # Month mappings
+                    months_ru = {
+                        1: "Января", 2: "Февраля", 3: "Марта", 4: "Апреля", 5: "Мая", 6: "Июня",
+                        7: "Июля", 8: "Августа", 9: "Сентября", 10: "Октября", 11: "Ноября", 12: "Декабря"
+                    }
+
+                    months_kz = {
+                        1: "Қаңтар", 2: "Ақпан", 3: "Наурыз", 4: "Сәуір", 5: "Мамыр", 6: "Маусым",
+                        7: "Шілде", 8: "Тамыз", 9: "Қыркүйек", 10: "Қазан", 11: "Қараша", 12: "Желтоқсан"
+                    }
+
+                    weekdays_ru = {
+                        0: "Понедельник", 1: "Вторник", 2: "Среда",
+                        3: "Четверг", 4: "Пятница", 5: "Суббота", 6: "Воскресенье"
+                    }
+
+                    weekdays_kz = {
+                        0: "Дүйсенбі", 1: "Сейсенбі", 2: "Сәрсенбі",
+                        3: "Бейсенбі", 4: "Жұма", 5: "Сенбі", 6: "Жексенбі"
+                    }
+
+                    return {
+                        "date": f"{date_obj.day} {months_ru[date_obj.month]}",
+                        "date_kz": f"{date_obj.day} {months_kz[date_obj.month]}",
+                        "weekday": weekdays_ru[date_obj.weekday()],
+                        "weekday_kz": weekdays_kz[date_obj.weekday()],
+                    }
+                except Exception as e:
+                    logger.error(f"Error formatting date: {e}")
+                    return {
+                        "date": "Неизвестная дата",
+                        "date_kz": "Белгісіз күн",
+                        "weekday": "Неизвестный день",
+                        "weekday_kz": "Белгісіз күн",
+                    }
+
+            # For which_time_in_certain_day function
             if function_name == "which_time_in_certain_day":
                 date_time = function_args.get("date_time", "")
                 date_relation = get_date_relation(date_time)
                 date_info = format_date_info(date_time)
+                specialist_name = result.get("doctor", "Специалист")
 
-                # Проверяем, есть ли ошибка в результате
-                if isinstance(result, dict) and result.get("status", "").startswith("error"):
-                    if "no available times" in result.get("message", "").lower() or "не найдено" in result.get(
-                            "message", "").lower():
-                        status = "error_empty_windows"
-                        if date_relation == "today":
-                            status = "error_empty_windows_today"
-                        elif date_relation == "tomorrow":
-                            status = "error_empty_windows_tomorrow"
+                # Check for error with no available slots
+                if "status" in result and result["status"].startswith("error_empty_windows"):
+                    status = f"error_empty_windows"
+                    if date_relation == "today":
+                        status = f"error_empty_windows_today"
+                    elif date_relation == "tomorrow":
+                        status = f"error_empty_windows_tomorrow"
 
-                        formatted = {
-                            "status": status,
-                            "message": f"Свободных приемов {'на сегодня' if date_relation == 'today' else 'на завтра' if date_relation == 'tomorrow' else ''} не найдено."
-                        }
+                    response = {
+                        "status": status,
+                        "message": f"Свободных приемов {'на сегодня' if date_relation == 'today' else 'на завтра' if date_relation == 'tomorrow' else ''} не найдено."
+                    }
 
-                        if date_relation == "today":
-                            formatted["day"] = "сегодня"
-                            formatted["day_kz"] = "бүгін"
-                        elif date_relation == "tomorrow":
-                            formatted["day"] = "завтра"
-                            formatted["day_kz"] = "ертең"
+                    if date_relation == "today":
+                        response["day"] = "сегодня"
+                        response["day_kz"] = "бүгін"
+                    elif date_relation == "tomorrow":
+                        response["day"] = "завтра"
+                        response["day_kz"] = "ертең"
 
-                        return formatted
+                    return response
 
-                # Извлекаем доступные времена
-                times = []
-                if isinstance(result, dict):
-                    # Проверяем разные форматы времен
-                    if "all_available_times" in result and isinstance(result["all_available_times"], list):
-                        times = result["all_available_times"]
-                    elif "time_1" in result and result["time_1"]:
-                        for i in range(1, 4):
-                            key = f"time_{i}"
-                            if key in result and result[key]:
-                                times.append(result[key])
-                    elif "first_time" in result and result["first_time"]:
-                        for key in ["first_time", "second_time", "third_time"]:
-                            if key in result and result[key]:
-                                times.append(result[key])
+                # Extract available times
+                available_times = []
 
-                # Очищаем времена (убираем дату, если она есть)
+                if "all_available_times" in result and isinstance(result["all_available_times"], list):
+                    available_times = result["all_available_times"]
+                elif "time_1" in result and result["time_1"]:
+                    for i in range(1, 4):
+                        key = f"time_{i}"
+                        if key in result and result[key]:
+                            available_times.append(result[key])
+                elif "first_time" in result and result["first_time"]:
+                    for key in ["first_time", "second_time", "third_time"]:
+                        if key in result and result[key]:
+                            available_times.append(result[key])
+
+                # Clean times (remove seconds, extract from datetime strings)
                 clean_times = []
-                for t in times:
-                    if isinstance(t, str) and ' ' in t:
-                        clean_times.append(t.split(' ')[1])  # Берем только время
-                    else:
-                        clean_times.append(t)
+                for t in available_times:
+                    if isinstance(t, str):
+                        # Extract time part if in datetime format
+                        if " " in t:
+                            clean_times.append(t.split(" ")[1])
+                        else:
+                            # Remove seconds if present
+                            if t.count(":") == 2:
+                                clean_times.append(":".join(t.split(":")[:2]))
+                            else:
+                                clean_times.append(t)
 
-                # Определяем статус в зависимости от количества времен
+                # Determine status based on number of times
                 if len(clean_times) == 0:
                     status = "error_empty_windows"
                     if date_relation == "today":
@@ -471,11 +468,10 @@ class AssistantClient:
                     elif date_relation == "tomorrow":
                         status = "error_empty_windows_tomorrow"
 
-                    formatted = {
+                    response = {
                         "status": status,
                         "message": f"Свободных приемов {'на сегодня' if date_relation == 'today' else 'на завтра' if date_relation == 'tomorrow' else ''} не найдено."
                     }
-
                 elif len(clean_times) == 1:
                     status = "only_first_time"
                     if date_relation == "today":
@@ -483,16 +479,15 @@ class AssistantClient:
                     elif date_relation == "tomorrow":
                         status = "only_first_time_tomorrow"
 
-                    formatted = {
+                    response = {
                         "status": status,
                         "date": date_info["date"],
                         "date_kz": date_info["date_kz"],
-                        "specialist_name": result.get("doctor_name", "Специалист"),
+                        "specialist_name": specialist_name,
                         "weekday": date_info["weekday"],
                         "weekday_kz": date_info["weekday_kz"],
                         "first_time": clean_times[0]
                     }
-
                 elif len(clean_times) == 2:
                     status = "only_two_time"
                     if date_relation == "today":
@@ -500,17 +495,16 @@ class AssistantClient:
                     elif date_relation == "tomorrow":
                         status = "only_two_time_tomorrow"
 
-                    formatted = {
+                    response = {
                         "status": status,
                         "date": date_info["date"],
                         "date_kz": date_info["date_kz"],
-                        "specialist_name": result.get("doctor_name", "Специалист"),
+                        "specialist_name": specialist_name,
                         "weekday": date_info["weekday"],
                         "weekday_kz": date_info["weekday_kz"],
                         "first_time": clean_times[0],
                         "second_time": clean_times[1]
                     }
-
                 else:
                     status = "which_time"
                     if date_relation == "today":
@@ -518,234 +512,229 @@ class AssistantClient:
                     elif date_relation == "tomorrow":
                         status = "which_time_tomorrow"
 
-                    formatted = {
+                    response = {
                         "status": status,
                         "date": date_info["date"],
                         "date_kz": date_info["date_kz"],
-                        "specialist_name": result.get("doctor_name", "Специалист"),
+                        "specialist_name": specialist_name,
                         "weekday": date_info["weekday"],
                         "weekday_kz": date_info["weekday_kz"],
                         "first_time": clean_times[0],
-                        "second_time": clean_times[1] if len(clean_times) > 1 else None,
-                        "third_time": clean_times[2] if len(clean_times) > 2 else None
+                        "second_time": clean_times[1],
+                        "third_time": clean_times[2]
                     }
 
-                # Добавляем информацию о дне, если это сегодня/завтра
+                # Add day information for today/tomorrow
                 if date_relation == "today":
-                    formatted["day"] = "сегодня"
-                    formatted["day_kz"] = "бүгін"
+                    response["day"] = "сегодня"
+                    response["day_kz"] = "бүгін"
                 elif date_relation == "tomorrow":
-                    formatted["day"] = "завтра"
-                    formatted["day_kz"] = "ертең"
+                    response["day"] = "завтра"
+                    response["day_kz"] = "ертең"
 
-                # Удаляем None значения
-                formatted = {k: v for k, v in formatted.items() if v is not None}
+                return response
 
-                return formatted
-
-            # 2. appointment_time_for_patient - информация о текущей записи
+            # For appointment_time_for_patient function
             elif function_name == "appointment_time_for_patient":
-                if isinstance(result, dict):
-                    if result.get("status") == "error_no_appointment":
-                        return {
-                            "status": "error_reception_unavailable",
-                            "message": "У пациента нет активных записей на прием"
-                        }
+                if "status" in result and result["status"] == "error_no_appointment":
+                    return {
+                        "status": "error_reception_unavailable",
+                        "message": "У пациента нет активных записей на прием"
+                    }
 
-                    if "appointment_time" in result and "appointment_date" in result:
-                        date_info = format_date_info(result["appointment_date"])
-                        date_relation = get_date_relation(result["appointment_date"])
+                if "appointment_time" in result and "appointment_date" in result:
+                    date_info = format_date_info(result["appointment_date"])
+                    date_relation = get_date_relation(result["appointment_date"])
 
-                        formatted = {
-                            "status": "success_for_check_info",
-                            "specialist_name": result.get("doctor_name", "Специалист"),
-                            "date": date_info["date"],
-                            "date_kz": date_info["date_kz"],
-                            "weekday": date_info["weekday"],
-                            "weekday_kz": date_info["weekday_kz"],
-                            "time": result["appointment_time"]
-                        }
+                    response = {
+                        "status": "success_for_check_info",
+                        "specialist_name": result.get("doctor_name", "Специалист"),
+                        "date": date_info["date"],
+                        "date_kz": date_info["date_kz"],
+                        "weekday": date_info["weekday"],
+                        "weekday_kz": date_info["weekday_kz"],
+                        "time": result["appointment_time"]
+                    }
 
-                        if date_relation == "today":
-                            formatted["day"] = "сегодня"
-                            formatted["day_kz"] = "бүгін"
-                        elif date_relation == "tomorrow":
-                            formatted["day"] = "завтра"
-                            formatted["day_kz"] = "ертең"
+                    if date_relation == "today":
+                        response["day"] = "сегодня"
+                        response["day_kz"] = "бүгін"
+                    elif date_relation == "tomorrow":
+                        response["day"] = "завтра"
+                        response["day_kz"] = "ертең"
 
-                        return formatted
+                    return response
 
-                # Если не получается правильно отформатировать, возвращаем исходник
+                # If can't format properly, return original
                 return result
 
-            # 3. reserve_reception_for_patient - запись/перенос
+            # For reserve_reception_for_patient function
             elif function_name == "reserve_reception_for_patient":
                 date_from_patient = function_args.get("date_from_patient", "")
                 date_relation = get_date_relation(date_from_patient)
                 date_info = format_date_info(date_from_patient)
 
-                if isinstance(result, dict):
-                    status = result.get("status", "")
+                status = result.get("status", "")
 
-                    # Успешный случай
-                    if status == "success_schedule":
-                        success_status = "success_change_reception"
+                # Success case
+                if status == "success_schedule" or status.startswith("success_change_reception"):
+                    success_status = "success_change_reception"
+                    if date_relation == "today":
+                        success_status = "success_change_reception_today"
+                    elif date_relation == "tomorrow":
+                        success_status = "success_change_reception_tomorrow"
+
+                    # Clean time format
+                    time_value = result.get("time", "")
+                    if " " in time_value:
+                        time_value = time_value.split(" ")[1]
+
+                    # Remove seconds if present
+                    if time_value.count(":") == 2:
+                        time_value = ":".join(time_value.split(":")[:2])
+
+                    response = {
+                        "status": success_status,
+                        "date": date_info["date"],
+                        "date_kz": date_info["date_kz"],
+                        "specialist_name": result.get("specialist_name", "Специалист"),
+                        "weekday": date_info["weekday"],
+                        "weekday_kz": date_info["weekday_kz"],
+                        "time": time_value
+                    }
+
+                    if date_relation == "today":
+                        response["day"] = "сегодня"
+                        response["day_kz"] = "бүгін"
+                    elif date_relation == "tomorrow":
+                        response["day"] = "завтра"
+                        response["day_kz"] = "ертең"
+
+                    return response
+
+                # Error case with alternative times
+                elif status == "suggest_times" and "suggested_times" in result:
+                    suggested_times = result["suggested_times"]
+
+                    # Clean times
+                    clean_times = []
+                    for t in suggested_times:
+                        if " " in t:
+                            clean_times.append(t.split(" ")[1])
+                        else:
+                            clean_times.append(t)
+
+                    # Determine status based on number of times
+                    if len(clean_times) == 0:
+                        error_status = "error_empty_windows"
                         if date_relation == "today":
-                            success_status = "success_change_reception_today"
+                            error_status = "error_empty_windows_today"
                         elif date_relation == "tomorrow":
-                            success_status = "success_change_reception_tomorrow"
+                            error_status = "error_empty_windows_tomorrow"
 
-                        # Извлекаем время, если передан полный datetime
-                        time_value = result.get("time", "")
-                        if isinstance(time_value, str) and ' ' in time_value:
-                            time_value = time_value.split(' ')[1]
+                        response = {
+                            "status": error_status,
+                            "message": f"Свободных приемов не найдено."
+                        }
+                    elif len(clean_times) == 1:
+                        error_status = "change_only_first_time"
+                        if date_relation == "today":
+                            error_status = "change_only_first_time_today"
+                        elif date_relation == "tomorrow":
+                            error_status = "change_only_first_time_tomorrow"
 
-                        formatted = {
-                            "status": success_status,
+                        response = {
+                            "status": error_status,
                             "date": date_info["date"],
                             "date_kz": date_info["date_kz"],
                             "specialist_name": result.get("specialist_name", "Специалист"),
                             "weekday": date_info["weekday"],
                             "weekday_kz": date_info["weekday_kz"],
-                            "time": time_value
+                            "first_time": clean_times[0]
                         }
-
+                    elif len(clean_times) == 2:
+                        error_status = "change_only_two_time"
                         if date_relation == "today":
-                            formatted["day"] = "сегодня"
-                            formatted["day_kz"] = "бүгін"
+                            error_status = "change_only_two_time_today"
                         elif date_relation == "tomorrow":
-                            formatted["day"] = "завтра"
-                            formatted["day_kz"] = "ертең"
+                            error_status = "change_only_two_time_tomorrow"
 
-                        return formatted
-
-                    # Случай ошибки с предложением альтернатив
-                    elif status == "suggest_times" and "suggested_times" in result:
-                        suggested_times = result["suggested_times"]
-
-                        # Очищаем времена (извлекаем часть времени, если надо)
-                        clean_times = []
-                        for t in suggested_times:
-                            if isinstance(t, str) and ' ' in t:
-                                clean_times.append(t.split(' ')[1])
-                            else:
-                                clean_times.append(t)
-
-                        # Определяем статус в зависимости от количества времен
-                        if len(clean_times) == 0:
-                            error_status = "error_empty_windows"
-                            if date_relation == "today":
-                                error_status = "error_empty_windows_today"
-                            elif date_relation == "tomorrow":
-                                error_status = "error_empty_windows_tomorrow"
-
-                            formatted = {
-                                "status": error_status,
-                                "message": f"Свободных приемов {'на сегодня' if date_relation == 'today' else 'на завтра' if date_relation == 'tomorrow' else ''} не найдено."
-                            }
-
-                        elif len(clean_times) == 1:
-                            error_status = "change_only_first_time"
-                            if date_relation == "today":
-                                error_status = "change_only_first_time_today"
-                            elif date_relation == "tomorrow":
-                                error_status = "change_only_first_time_tomorrow"
-
-                            formatted = {
-                                "status": error_status,
-                                "date": date_info["date"],
-                                "date_kz": date_info["date_kz"],
-                                "specialist_name": result.get("specialist_name", "Специалист"),
-                                "weekday": date_info["weekday"],
-                                "weekday_kz": date_info["weekday_kz"],
-                                "first_time": clean_times[0]
-                            }
-
-                        elif len(clean_times) == 2:
-                            error_status = "change_only_two_time"
-                            if date_relation == "today":
-                                error_status = "change_only_two_time_today"
-                            elif date_relation == "tomorrow":
-                                error_status = "change_only_two_time_tomorrow"
-
-                            formatted = {
-                                "status": error_status,
-                                "date": date_info["date"],
-                                "date_kz": date_info["date_kz"],
-                                "specialist_name": result.get("specialist_name", "Специалист"),
-                                "weekday": date_info["weekday"],
-                                "weekday_kz": date_info["weekday_kz"],
-                                "first_time": clean_times[0],
-                                "second_time": clean_times[1]
-                            }
-
-                        else:
-                            error_status = "error_change_reception"
-                            if date_relation == "today":
-                                error_status = "error_change_reception_today"
-                            elif date_relation == "tomorrow":
-                                error_status = "error_change_reception_tomorrow"
-
-                            formatted = {
-                                "status": error_status,
-                                "date": date_info["date"],
-                                "date_kz": date_info["date_kz"],
-                                "specialist_name": result.get("specialist_name", "Специалист"),
-                                "weekday": date_info["weekday"],
-                                "weekday_kz": date_info["weekday_kz"],
-                                "first_time": clean_times[0],
-                                "second_time": clean_times[1],
-                                "third_time": clean_times[2] if len(clean_times) > 2 else None
-                            }
-
-                        # Добавляем информацию о дне
-                        if date_relation == "today":
-                            formatted["day"] = "сегодня"
-                            formatted["day_kz"] = "бүгін"
-                        elif date_relation == "tomorrow":
-                            formatted["day"] = "завтра"
-                            formatted["day_kz"] = "ертең"
-
-                        # Удаляем None значения
-                        formatted = {k: v for k, v in formatted.items() if v is not None}
-
-                        return formatted
-
-                    # Ошибка с неправильной датой
-                    elif "date" in result.get("message", "").lower():
-                        return {
-                            "status": "error_change_reception_bad_date",
-                            "data": result.get("message", "Неверный формат даты")
-                        }
-
-                # Если не получается правильно отформатировать, возвращаем исходник
-                return result
-
-            # 4. delete_reception_for_patient - отмена записи
-            elif function_name == "delete_reception_for_patient":
-                if isinstance(result, dict):
-                    status = result.get("status", "")
-
-                    if status == "success_delete":
-                        return {
-                            "status": "success_deleting_reception",
-                            "message": "Запись успешно удалена"
+                        response = {
+                            "status": error_status,
+                            "date": date_info["date"],
+                            "date_kz": date_info["date_kz"],
+                            "specialist_name": result.get("specialist_name", "Специалист"),
+                            "weekday": date_info["weekday"],
+                            "weekday_kz": date_info["weekday_kz"],
+                            "first_time": clean_times[0],
+                            "second_time": clean_times[1]
                         }
                     else:
-                        return {
-                            "status": "error_deleting_reception",
-                            "message": result.get("message", "Ошибка при удалении записи")
+                        error_status = "error_change_reception"
+                        if date_relation == "today":
+                            error_status = "error_change_reception_today"
+                        elif date_relation == "tomorrow":
+                            error_status = "error_change_reception_tomorrow"
+
+                        response = {
+                            "status": error_status,
+                            "date": date_info["date"],
+                            "date_kz": date_info["date_kz"],
+                            "specialist_name": result.get("specialist_name", "Специалист"),
+                            "weekday": date_info["weekday"],
+                            "weekday_kz": date_info["weekday_kz"],
+                            "first_time": clean_times[0],
+                            "second_time": clean_times[1],
+                            "third_time": clean_times[2] if len(clean_times) > 2 else None
                         }
 
-                # Если не получается правильно отформатировать, возвращаем исходник
+                    # Add day information
+                    if date_relation == "today":
+                        response["day"] = "сегодня"
+                        response["day_kz"] = "бүгін"
+                    elif date_relation == "tomorrow":
+                        response["day"] = "завтра"
+                        response["day_kz"] = "ертең"
+
+                    # Remove None values
+                    response = {k: v for k, v in response.items() if v is not None}
+
+                    return response
+
+                # Bad date error
+                elif status == "error_change_reception_bad_date" or "date" in result.get("message", "").lower():
+                    return {
+                        "status": "error_change_reception_bad_date",
+                        "data": result.get("message", "Неверный формат даты")
+                    }
+
+                # Non-working time
+                elif status == "nonworktime":
+                    return {"status": "nonworktime"}
+
+                # If can't format properly, return original
                 return result
 
-            # Неизвестная функция - возвращаем как есть
-            else:
-                return result
+            # For delete_reception_for_patient function
+            elif function_name == "delete_reception_for_patient":
+                status = result.get("status", "")
+
+                if status == "success_delete":
+                    return {
+                        "status": "success_deleting_reception",
+                        "message": "Запись успешно удалена"
+                    }
+                else:
+                    return {
+                        "status": "error_deleting_reception",
+                        "message": result.get("message", "Ошибка при удалении записи")
+                    }
+
+            # Unknown function - return original
+            return result
 
         except Exception as e:
-            logger.error(f"Ошибка форматирования ответа для ACS: {e}", exc_info=True)
+            logger.error(f"Error formatting response for ACS: {e}", exc_info=True)
             return {
                 "status": "error",
                 "message": f"Ошибка форматирования ответа: {str(e)}"
@@ -906,10 +895,10 @@ class AssistantClient:
             logger.error(f"Ошибка при получении сообщений: {str(e)}")
             raise
 
-    def wait_for_run_completion(self, thread_id: str, run_id: str, timeout: int = 60) -> str:
+    def wait_for_run_completion(self, thread_id: str, run_id: str, timeout: int = 60) -> dict:
         """
-        Waits for completion of an assistant run using streaming API, with proper handling
-        of function calls and status mapping for ACS voice robot.
+        Waits for completion of an assistant run, handling function calls.
+        Returns the formatted results of any function calls.
 
         Args:
             thread_id: Thread ID
@@ -917,61 +906,48 @@ class AssistantClient:
             timeout: Maximum wait time in seconds
 
         Returns:
-            str: Final run status
+            dict: Formatted function results or status
         """
         import time
 
         logger.info(f"Waiting for completion of run {run_id} (timeout: {timeout}s)")
 
         start_time = time.time()
+        function_results = None
 
         try:
-            # Stream the run updates
-            for event in self.client.beta.threads.runs.stream(
+            while time.time() - start_time < timeout:
+                run = self.client.beta.threads.runs.retrieve(
                     thread_id=thread_id,
                     run_id=run_id
-            ):
-                # Check for timeout
-                if time.time() - start_time > timeout:
-                    logger.warning(f"Run {run_id} exceeded timeout {timeout}s, cancelling")
-                    self._cancel_run(thread_id, run_id)
-                    return "cancelled"
+                )
 
-                # Process different event types
-                if hasattr(event, 'event'):
-                    event_type = event.event
-                    logger.info(f"Received event: {event_type}")
+                current_status = run.status
+                self._update_run_status(run_id, current_status)
 
-                    if event_type == "thread.run.requires_action":
-                        logger.info(f"Run {run_id} requires action")
-                        self._update_run_status(run_id, "requires_action")
+                # Handle function calls if needed
+                if current_status == "requires_action":
+                    logger.info(f"Run {run_id} requires action")
+                    function_results = self.handle_function_calls(run_id, thread_id)
+                    logger.info(f"Function call result: {function_results}")
+                    continue
 
-                        # Handle function calls with proper response formatting for ACS
-                        result = self.handle_function_calls(run_id, thread_id)
-                        logger.info(f"Function call result: {result}")
+                # Return if the run has completed
+                if current_status in ["completed", "failed", "cancelled", "expired"]:
+                    logger.info(f"Run {run_id} ended with status: {current_status}")
+                    return function_results if function_results else {"status": current_status}
 
-                    elif event_type == "thread.run.completed":
-                        logger.info(f"Run {run_id} completed")
-                        self._update_run_status(run_id, "completed")
-                        return "completed"
+                # Wait before polling again
+                time.sleep(1.5)
 
-                    elif event_type in ["thread.run.failed", "thread.run.cancelled", "thread.run.expired"]:
-                        logger.info(f"Run {run_id} ended with status: {event_type.split('.')[-1]}")
-                        self._update_run_status(run_id, event_type.split('.')[-1])
-                        return event_type.split('.')[-1]
-
-                    elif event_type == "thread.run.in_progress":
-                        logger.info(f"Run {run_id} in progress")
-                        self._update_run_status(run_id, "in_progress")
-
-            # If we exit the loop, check the final status
-            final_status = self._check_run_status(thread_id, run_id)
-            return final_status
+            # If we reach here, we exceeded the timeout
+            logger.warning(f"Run {run_id} exceeded timeout {timeout}s, cancelling")
+            self._cancel_run(thread_id, run_id)
+            return {"status": "cancelled"}
 
         except Exception as e:
-            logger.error(f"Error streaming run updates: {str(e)}")
-            # Fall back to polling method
-            return self._poll_run_completion(thread_id, run_id, timeout - (time.time() - start_time))
+            logger.error(f"Error in wait_for_run_completion: {str(e)}")
+            return {"status": "error", "message": str(e)}
 
     def _check_run_status(self, thread_id: str, run_id: str) -> str:
         """
@@ -1200,3 +1176,43 @@ class AssistantClient:
             logger.error(f"Error rounding time '{time_str}': {e}")
             # Return original if parsing fails
             return time_str
+
+    def get_last_function_call_result(self, thread_id: str, run_id: str) -> dict:
+        """
+        Gets the result of the last function call from a run.
+
+        Args:
+            thread_id: Thread ID
+            run_id: Run ID
+
+        Returns:
+            dict: Function call result or empty dict if none found
+        """
+        try:
+            run = self.client.beta.threads.runs.retrieve(
+                thread_id=thread_id,
+                run_id=run_id
+            )
+
+            # Check if run has tool calls
+            if run.status == "requires_action" and run.required_action:
+                tool_calls = run.required_action.submit_tool_outputs.tool_calls
+                for tool_call in tool_calls:
+                    try:
+                        function_name = tool_call.function.name
+                        function_args = json.loads(tool_call.function.arguments)
+
+                        # Call function and get result
+                        result = self._call_function(function_name, function_args, thread_id)
+
+                        # Format result for ACS
+                        formatted_result = self._format_for_acs(function_name, function_args, result)
+
+                        return formatted_result
+                    except Exception as e:
+                        logger.error(f"Error getting function call result: {e}")
+
+            return {}
+        except Exception as e:
+            logger.error(f"Error retrieving run: {e}")
+            return {}
