@@ -148,7 +148,7 @@ def create_assistant_with_tools(client, name: str, instructions: str, model: str
 
 # Response templates for various statuses
 RESPONSE_TEMPLATES = {
-    # Success responses for appointment rescheduling
+    # Success responses for appointment rescheduling (Запись 9-1, 9-2)
     "success_change_reception": {
         "status": "success_change_reception",
         "date": "{date}",  # e.g., "29 Января"
@@ -181,7 +181,7 @@ RESPONSE_TEMPLATES = {
         "day_kz": "ертең"
     },
 
-    # Only one time available
+    # Only one time available (Запись 16.1 - Одно)
     "only_first_time": {
         "status": "only_first_time",
         "date": "{date}",
@@ -214,7 +214,7 @@ RESPONSE_TEMPLATES = {
         "day_kz": "ертең"
     },
 
-    # Only two times available
+    # Only two times available (Запись 16.1 - Два)
     "only_two_time": {
         "status": "only_two_time",
         "date": "{date}",
@@ -250,7 +250,7 @@ RESPONSE_TEMPLATES = {
         "day_kz": "ертең"
     },
 
-    # No available time slots
+    # No available time slots (Запись 14.1, 16.1 - Занято)
     "error_empty_windows": {
         "status": "error_empty_windows",
         "message": "Свободных приемов не найдено."
@@ -268,7 +268,7 @@ RESPONSE_TEMPLATES = {
         "day_kz": "ертең"
     },
 
-    # Available time slots
+    # Available time slots (Запись 14.1, 16.1)
     "which_time": {
         "status": "which_time",
         "date": "{date}",
@@ -307,19 +307,19 @@ RESPONSE_TEMPLATES = {
         "day_kz": "ертең"
     },
 
-    # Successful appointment deletion
+    # Successful appointment deletion (Запись 7)
     "success_deleting_reception": {
         "status": "success_deleting_reception",
         "message": "Запись успешно удалена"
     },
 
-    # Error deleting appointment
+    # Error deleting appointment (Запись 7)
     "error_deleting_reception": {
         "status": "error_deleting_reception",
         "message": "{message}"
     },
 
-    # Error rescheduling with alternative times
+    # Error rescheduling with alternative times (Запись 11)
     "error_change_reception": {
         "status": "error_change_reception",
         "specialist_name": "{specialist_name}",
@@ -358,7 +358,7 @@ RESPONSE_TEMPLATES = {
         "day_kz": "ертең"
     },
 
-    # Single alternative time for rescheduling
+    # Single alternative time for rescheduling (Запись 11 - Одно)
     "change_only_first_time": {
         "status": "change_only_first_time",
         "date": "{date}",
@@ -391,7 +391,7 @@ RESPONSE_TEMPLATES = {
         "day_kz": "ертең"
     },
 
-    # Two alternative times for rescheduling
+    # Two alternative times for rescheduling (Запись 11 - Два)
     "change_only_two_time": {
         "status": "change_only_two_time",
         "date": "{date}",
@@ -427,7 +427,7 @@ RESPONSE_TEMPLATES = {
         "day_kz": "ертең"
     },
 
-    # Bad date format
+    # Bad date format (Запись 14.1)
     "error_change_reception_bad_date": {
         "status": "error_change_reception_bad_date",
         "data": "{message}"
@@ -435,21 +435,24 @@ RESPONSE_TEMPLATES = {
 
     # Other statuses
     "nonworktime": {
-        "status": "nonworktime"
+        "status": "nonworktime"  # Запись 13
     },
     "bad_user_input": {
-        "status": "bad_user_input"
-    },
-    "error": {
-        "status": "error",
-        "message": "{message}"
+        "status": "bad_user_input"  # Запись 30
     },
     "error_med_element": {
-        "status": "error_med_element",
+        "status": "error_med_element",  # Запись 30
         "message": "{message}"
+    },
+    "no_action_required": {
+        "status": "no_action_required"  # Запись 30
     },
     "error_reception_unavailable": {
         "status": "error_reception_unavailable",
+        "message": "{message}"
+    },
+    "error": {
+        "status": "error",
         "message": "{message}"
     },
     "error_starttime_date_not_found": {
@@ -465,7 +468,7 @@ RESPONSE_TEMPLATES = {
         "message": "{message}"
     },
     "error_bad_input": {
-        "status": "error_bad_input",
+        "status": "error_bad_input",  # Запись 30
         "message": "{message}"
     },
     "error_ignored_patient": {

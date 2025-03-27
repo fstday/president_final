@@ -365,18 +365,62 @@ class AssistantClient:
             # СЛУЧАЙ 2: Запись/перенос записи
             elif function_name == "reserve_reception_for_patient":
                 patient_id = function_args.get("patient_id")
-                date_from_patient = function_args.get("date_from_patient")
+                date_from_patient = function_args.get("date_from_patient", "")
                 trigger_id = function_args.get("trigger_id", 1)
 
-                # Проверка обязательных параметров
-                if not patient_id or not date_from_patient:
+                # Process relative dates
+                if isinstance(date_from_patient, str) and "через" in date_from_patient.lower():
+                    # Parsing "через неделю", "через 3 дня" etc.
+                    relative_date = self._parse_relative_date(date_from_patient)
+                    if relative_date:
+                        function_args["date_from_patient"] = relative_date
+
+                # Handle time of day references
+                if isinstance(date_from_patient, str) and not re.search(r'\d{1,2}:\d{2}', date_from_patient):
+                    # Check for time of day references
+                    date_part = date_from_patient.split()[0] if ' ' in date_from_patient else date_from_patient
+                    time_of_day = self._extract_time_of_day(date_from_patient.lower())
+                    if time_of_day:
+                        # Map time of day to specific hour
+                        specific_time = ""
+                        if "утр" in time_of_day:
+                            specific_time = "10:30"
+                        elif "обед" in time_of_day:
+                            specific_time = "13:30"
+                        elif "вечер" in time_of_day or "ужин" in time_of_day:
+                            specific_time = "18:30"
+
+                        if specific_time:
+                            function_args["date_from_patient"] = f"{date_part} {specific_time}"
+
+                # ADD THIS NEW SECTION FOR TIME ROUNDING:
+                # Process and round the appointment time if needed
+                if isinstance(date_from_patient, str) and " " in date_from_patient:
+                    # Split date and time
+                    date_parts = date_from_patient.split()
+                    date_part = date_parts[0]
+                    time_part = date_parts[1] if len(date_parts) > 1 else ""
+
+                    if time_part and ":" in time_part:
+                        # Round time to nearest half-hour
+                        rounded_time = self._round_to_nearest_half_hour(time_part)
+
+                        if rounded_time != time_part:
+                            logger.info(f"Rounded appointment time from {time_part} to {rounded_time}")
+
+                        # Update the argument with rounded time
+                        function_args["date_from_patient"] = f"{date_part} {rounded_time}"
+
+                # Check mandatory parameters
+                if not patient_id:
                     return {
                         "status": "error",
-                        "message": "Не указаны обязательные параметры (patient_id или date_from_patient)"
+                        "message": "Patient code not found for this patient"
                     }
 
-                logger.info(f"Создаем/переносим запись для пациента {patient_id} на {date_from_patient}")
-                return reserve_reception_for_patient(patient_id, date_from_patient, trigger_id)
+                logger.info(
+                    f"Creating/rescheduling appointment for patient {patient_id} at {function_args['date_from_patient']}")
+                return reserve_reception_for_patient(patient_id, function_args["date_from_patient"], trigger_id)
 
             # СЛУЧАЙ 3: Получение информации о текущей записи
             elif function_name == "appointment_time_for_patient":
@@ -667,3 +711,39 @@ class AssistantClient:
         except Exception as e:
             logger.error(f"Ошибка получения последнего сообщения пользователя: {str(e)}")
             return ""
+
+    def _round_to_nearest_half_hour(self, time_str):
+        """
+        Rounds a time string to the nearest half-hour since the clinic operates
+        on 30-minute intervals.
+
+        Args:
+            time_str: Time string in format "HH:MM"
+
+        Returns:
+            Time string rounded to nearest half-hour
+        """
+        try:
+            hour, minute = map(int, time_str.split(':'))
+
+            # Round minutes to nearest 30
+            if minute < 15:
+                # Round down to the hour
+                new_minute = 0
+            elif 15 <= minute < 45:
+                # Round to half hour
+                new_minute = 30
+            else:
+                # Round up to the next hour
+                new_minute = 0
+                hour += 1
+
+            # Handle hour overflow
+            if hour >= 24:
+                hour = 0
+
+            return f"{hour:02d}:{new_minute:02d}"
+        except Exception as e:
+            logger.error(f"Error rounding time '{time_str}': {e}")
+            # Return original if parsing fails
+            return time_str
