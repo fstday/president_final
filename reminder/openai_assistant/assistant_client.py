@@ -7,7 +7,10 @@ from typing import Dict, List, Optional, Any, Union
 from django.utils import timezone
 from django.conf import settings
 from openai import OpenAI
-
+from reminder.openai_assistant.response_formatter import (
+    format_booking_response, format_available_times_response,
+    MONTHS_RU, MONTHS_KZ, WEEKDAYS_RU, WEEKDAYS_KZ
+)
 from reminder.models import Assistant, Thread, Run as RunModel, Patient, Appointment, QueueInfo
 from reminder.openai_assistant.assistant_instructions import get_enhanced_assistant_prompt
 
@@ -140,13 +143,14 @@ class AssistantClient:
             logger.error(f"Ошибка при добавлении сообщения в тред: {str(e)}")
             raise
 
-    def run_assistant(self, thread: Thread, appointment: Appointment) -> RunModel:
+    def run_assistant(self, thread: Thread, appointment: Appointment, instructions: str = None) -> RunModel:
         """
         Runs the assistant with proper instructions to ensure function calling
 
         Args:
             thread: Thread object
             appointment: Appointment object
+            instructions: Additional instructions to enforce function calling
 
         Returns:
             RunModel: Run model object
@@ -175,49 +179,44 @@ class AssistantClient:
             today = datetime.now().strftime("%Y-%m-%d")
             tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-            # Create explicit instructions with examples
-            instructions = f"""
-            # КРИТИЧЕСКИ ВАЖНО: ВСЕГДА ИСПОЛЬЗУЙ ФУНКЦИИ, А НЕ ТЕКСТОВЫЕ ОТВЕТЫ!
+            # Use provided instructions or create default
+            if not instructions:
+                instructions = """
+                # КРИТИЧЕСКИ ВАЖНО: ВСЕГДА ИСПОЛЬЗУЙ ФУНКЦИИ, А НЕ ТЕКСТОВЫЕ ОТВЕТЫ!
 
-            В следующих ситуациях ты ОБЯЗАТЕЛЬНО должен вызвать функцию вместо текстового ответа:
+                В следующих ситуациях ты ОБЯЗАТЕЛЬНО должен вызвать функцию вместо текстового ответа:
 
-            1. Когда пользователь спрашивает о свободных окошках или времени:
-               → ВСЕГДА вызывай функцию which_time_in_certain_day с параметрами:
-                  - patient_code: "{patient_code}"
-                  - date_time: "today" или "tomorrow" или конкретная дата в формате YYYY-MM-DD
+                1. Когда пользователь спрашивает о свободных окошках или времени:
+                   → ВСЕГДА вызывай функцию which_time_in_certain_day с параметрами:
+                      - patient_code: "{patient_code}"
+                      - date_time: "today" или "tomorrow" или конкретная дата в формате YYYY-MM-DD
 
-            2. Когда пользователь интересуется своей текущей записью:
-               → ВСЕГДА вызывай функцию appointment_time_for_patient с параметрами:
-                  - patient_code: "{patient_code}"
+                2. Когда пользователь интересуется своей текущей записью:
+                   → ВСЕГДА вызывай функцию appointment_time_for_patient с параметрами:
+                      - patient_code: "{patient_code}"
 
-            3. Когда пользователь хочет записаться или перенести запись:
-               → ВСЕГДА вызывай функцию reserve_reception_for_patient с параметрами:
-                  - patient_id: "{patient_code}"
-                  - date_from_patient: конкретная дата и время в формате "YYYY-MM-DD HH:MM"
-                  - trigger_id: 1 для записи, 2 для поиска ближайших свободных времен
+                3. Когда пользователь хочет записаться или перенести запись:
+                   → ВСЕГДА вызывай функцию reserve_reception_for_patient с параметрами:
+                      - patient_id: "{patient_code}"
+                      - date_from_patient: конкретная дата и время в формате "YYYY-MM-DD HH:MM"
+                      - trigger_id: 1 для записи, 2 для поиска ближайших свободных времен
 
-            4. Когда пользователь хочет отменить запись:
-               → ВСЕГДА вызывай функцию delete_reception_for_patient с параметрами:
-                  - patient_id: "{patient_code}"
+                4. Когда пользователь хочет отменить запись:
+                   → ВСЕГДА вызывай функцию delete_reception_for_patient с параметрами:
+                      - patient_id: "{patient_code}"
 
-            # КОНКРЕТНЫЕ ПРИМЕРЫ ВЫЗОВОВ ФУНКЦИЙ:
+                # ЗАПРЕЩЕНО использовать текстовые ответы для вышеперечисленных запросов!
+                # ВСЕГДА вызывай соответствующую функцию!
+                """
 
-            "Какие свободные окошки на сегодня" → which_time_in_certain_day(patient_code="{patient_code}", date_time="today")
+            instructions = instructions.format(
+                patient_code=patient_code,
+                today=today,
+                tomorrow=tomorrow
+            )
 
-            "Какие окошки на завтра" → which_time_in_certain_day(patient_code="{patient_code}", date_time="tomorrow")
-
-            "Какие окна на пятницу" → which_time_in_certain_day(patient_code="{patient_code}", date_time="2025-03-22")
-
-            "Когда у меня запись" → appointment_time_for_patient(patient_code="{patient_code}")
-
-            "Во сколько мне приходить" → appointment_time_for_patient(patient_code="{patient_code}")
-
-            "Хочу записаться на завтра в 15:00" → reserve_reception_for_patient(patient_id="{patient_code}", date_from_patient="{tomorrow} 15:00", trigger_id=1)
-
-            "Перенесите на сегодня на вечер" → reserve_reception_for_patient(patient_id="{patient_code}", date_from_patient="{today} 18:00", trigger_id=1)
-
-            "Отмените мою запись" → delete_reception_for_patient(patient_id="{patient_code}")
-
+            # Add info about the patient and appointment
+            patient_info = f"""
             # ВАЖНАЯ ИНФОРМАЦИЯ О ПАЦИЕНТЕ И ПРИЕМЕ:
 
             - Текущий пациент: {patient.full_name} (ID: {patient_code})
@@ -225,15 +224,16 @@ class AssistantClient:
             - Время приема: {appointment_time}
             - Врач: {doctor_name}
             - Клиника: {clinic_name}
-
-            # ЗАПРЕЩЕНО использовать текстовые ответы для вышеперечисленных запросов!
             """
 
-            # Create assistant run
+            # Combine instructions
+            full_instructions = instructions + "\n\n" + patient_info
+
+            # Create assistant run with combined instructions
             openai_run = self.client.beta.threads.runs.create(
                 thread_id=thread.thread_id,
                 assistant_id=thread.assistant.assistant_id,
-                instructions=instructions
+                instructions=full_instructions
             )
 
             # Save run in database
@@ -246,7 +246,8 @@ class AssistantClient:
             thread.current_run = run
             thread.save()
 
-            logger.info(f"Started run {run.run_id} for thread {thread.thread_id}")
+            logger.info(
+                f"Started run {run.run_id} for thread {thread.thread_id} with strict function calling instructions")
             return run
 
         except Exception as e:
@@ -325,33 +326,396 @@ class AssistantClient:
 
     def _format_for_acs(self, function_name: str, function_args: dict, result: dict) -> dict:
         """
-        Formats function results for ACS according to required status formats.
+        Formats function results for ACS according to required status formats
+        with additional validation to ensure format compliance.
         """
         try:
-            # Helper functions for formatting
-            def get_date_relation(date_str):
-                """Determines if date is today, tomorrow, or other"""
+            # Extract date information if available
+            date_obj = None
+            date_str = None
+
+            # Look for date in various fields
+            date_fields = ["date", "date_time", "date_from_patient", "appointment_date"]
+            for field in date_fields:
+                if field in function_args and function_args[field]:
+                    date_str = function_args[field]
+                    break
+
+            # Parse date string
+            if date_str:
                 try:
                     if date_str == "today":
-                        return "today"
-                    if date_str == "tomorrow":
-                        return "tomorrow"
+                        date_obj = datetime.now()
+                    elif date_str == "tomorrow":
+                        date_obj = datetime.now() + timedelta(days=1)
+                    elif " " in date_str:  # Date with time (YYYY-MM-DD HH:MM)
+                        date_obj = datetime.strptime(date_str.split(" ")[0], "%Y-%m-%d")
+                    else:  # Date only (YYYY-MM-DD)
+                        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+                except ValueError:
+                    pass
 
-                    # Extract date part if time included
-                    if ' ' in date_str:
-                        date_str = date_str.split(' ')[0]
+            # Format date information
+            if date_obj:
+                day = date_obj.day
+                month_num = date_obj.month
+                weekday_idx = date_obj.weekday()
 
-                    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-                    today = datetime.now().date()
-                    tomorrow = today + timedelta(days=1)
+                date_info = {
+                    "date": f"{day} {MONTHS_RU[month_num]}",
+                    "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+                    "weekday": WEEKDAYS_RU[weekday_idx],
+                    "weekday_kz": WEEKDAYS_KZ[weekday_idx]
+                }
 
-                    if date_obj == today:
-                        return "today"
-                    elif date_obj == tomorrow:
-                        return "tomorrow"
-                    return None
-                except Exception:
-                    return None
+                # Determine if today or tomorrow
+                today = datetime.now().date()
+                tomorrow = today + timedelta(days=1)
+
+                if date_obj.date() == today:
+                    relation = "today"
+                    date_info["day"] = "сегодня"
+                    date_info["day_kz"] = "бүгін"
+                elif date_obj.date() == tomorrow:
+                    relation = "tomorrow"
+                    date_info["day"] = "завтра"
+                    date_info["day_kz"] = "ертең"
+                else:
+                    relation = None
+            else:
+                date_info = {}
+                relation = None
+
+            # Which time in certain day function (for available times)
+            if function_name == "which_time_in_certain_day":
+                available_times = []
+
+                # Extract available times from result
+                if "all_available_times" in result and isinstance(result["all_available_times"], list):
+                    available_times = result["all_available_times"]
+                elif "suggested_times" in result and isinstance(result["suggested_times"], list):
+                    available_times = result["suggested_times"]
+                elif "first_time" in result:
+                    if result.get("first_time"): available_times.append(result["first_time"])
+                    if "second_time" in result and result.get("second_time"): available_times.append(
+                        result["second_time"])
+                    if "third_time" in result and result.get("third_time"): available_times.append(result["third_time"])
+
+                # Clean times (remove date part, seconds)
+                cleaned_times = []
+                for t in available_times:
+                    if isinstance(t, str):
+                        if " " in t:  # Format: "YYYY-MM-DD HH:MM"
+                            t = t.split(" ")[1]
+                        if t.count(":") == 2:  # Format: "HH:MM:SS"
+                            t = ":".join(t.split(":")[:2])
+                        cleaned_times.append(t)
+
+                # No available times
+                if not cleaned_times:
+                    status = "error_empty_windows"
+                    if relation == "today":
+                        status = "error_empty_windows_today"
+                    elif relation == "tomorrow":
+                        status = "error_empty_windows_tomorrow"
+
+                    response = {
+                        "status": status,
+                        "message": "Свободных приемов не найдено."
+                    }
+
+                    if relation == "today":
+                        response["day"] = "сегодня"
+                        response["day_kz"] = "бүгін"
+                    elif relation == "tomorrow":
+                        response["day"] = "завтра"
+                        response["day_kz"] = "ертең"
+
+                    return response
+
+                # Only one time available
+                elif len(cleaned_times) == 1:
+                    status = "only_first_time"
+                    if relation == "today":
+                        status = "only_first_time_today"
+                    elif relation == "tomorrow":
+                        status = "only_first_time_tomorrow"
+
+                    response = {
+                        "status": status,
+                        **date_info,
+                        "specialist_name": result.get("specialist_name", "Специалист"),
+                        "first_time": cleaned_times[0]
+                    }
+
+                    return response
+
+                # Only two times available
+                elif len(cleaned_times) == 2:
+                    status = "only_two_time"
+                    if relation == "today":
+                        status = "only_two_time_today"
+                    elif relation == "tomorrow":
+                        status = "only_two_time_tomorrow"
+
+                    response = {
+                        "status": status,
+                        **date_info,
+                        "specialist_name": result.get("specialist_name", "Специалист"),
+                        "first_time": cleaned_times[0],
+                        "second_time": cleaned_times[1]
+                    }
+
+                    return response
+
+                # Three or more times available
+                else:
+                    status = "which_time"
+                    if relation == "today":
+                        status = "which_time_today"
+                    elif relation == "tomorrow":
+                        status = "which_time_tomorrow"
+
+                    response = {
+                        "status": status,
+                        **date_info,
+                        "specialist_name": result.get("specialist_name", "Специалист"),
+                        "first_time": cleaned_times[0],
+                        "second_time": cleaned_times[1],
+                        "third_time": cleaned_times[2]
+                    }
+
+                    return response
+
+            # Reserve reception for patient (booking/rescheduling)
+            elif function_name == "reserve_reception_for_patient":
+                # Success case
+                if result.get("status") == "success_schedule" or result.get("status", "").startswith(
+                        "success_change_reception"):
+                    time = result.get("time", "")
+                    if " " in time:  # Format: "YYYY-MM-DD HH:MM"
+                        time = time.split(" ")[1]
+                    if time.count(":") == 2:  # Format: "HH:MM:SS"
+                        time = ":".join(time.split(":")[:2])
+
+                    status = "success_change_reception"
+                    if relation == "today":
+                        status = "success_change_reception_today"
+                    elif relation == "tomorrow":
+                        status = "success_change_reception_tomorrow"
+
+                    response = {
+                        "status": status,
+                        **date_info,
+                        "specialist_name": result.get("specialist_name", "Специалист"),
+                        "time": time
+                    }
+
+                    return response
+
+                # Error case with alternative times
+                elif result.get("status") == "suggest_times" or result.get("status", "").startswith(
+                        "error_change_reception"):
+                    available_times = []
+
+                    # Extract available times
+                    if "suggested_times" in result and isinstance(result["suggested_times"], list):
+                        available_times = result["suggested_times"]
+
+                    # Clean times
+                    cleaned_times = []
+                    for t in available_times:
+                        if isinstance(t, str):
+                            if " " in t:  # Format: "YYYY-MM-DD HH:MM"
+                                t = t.split(" ")[1]
+                            if t.count(":") == 2:  # Format: "HH:MM:SS"
+                                t = ":".join(t.split(":")[:2])
+                            cleaned_times.append(t)
+
+                    # No alternative times
+                    if not cleaned_times:
+                        status = "error_change_reception_bad_date"
+                        return {
+                            "status": status,
+                            "data": result.get("message", "Ошибка изменения даты приема")
+                        }
+
+                    # One alternative time
+                    elif len(cleaned_times) == 1:
+                        status = "change_only_first_time"
+                        if relation == "today":
+                            status = "change_only_first_time_today"
+                        elif relation == "tomorrow":
+                            status = "change_only_first_time_tomorrow"
+
+                        response = {
+                            "status": status,
+                            **date_info,
+                            "specialist_name": result.get("specialist_name", "Специалист"),
+                            "first_time": cleaned_times[0]
+                        }
+
+                        return response
+
+                    # Two alternative times
+                    elif len(cleaned_times) == 2:
+                        status = "change_only_two_time"
+                        if relation == "today":
+                            status = "change_only_two_time_today"
+                        elif relation == "tomorrow":
+                            status = "change_only_two_time_tomorrow"
+
+                        response = {
+                            "status": status,
+                            **date_info,
+                            "specialist_name": result.get("specialist_name", "Специалист"),
+                            "first_time": cleaned_times[0],
+                            "second_time": cleaned_times[1]
+                        }
+
+                        return response
+
+                    # Three or more alternative times
+                    else:
+                        status = "error_change_reception"
+                        if relation == "today":
+                            status = "error_change_reception_today"
+                        elif relation == "tomorrow":
+                            status = "error_change_reception_tomorrow"
+
+                        response = {
+                            "status": status,
+                            **date_info,
+                            "specialist_name": result.get("specialist_name", "Специалист"),
+                            "first_time": cleaned_times[0],
+                            "second_time": cleaned_times[1],
+                            "third_time": cleaned_times[2]
+                        }
+
+                        return response
+
+                # Bad date error
+                elif result.get("status") == "error_change_reception_bad_date":
+                    return {
+                        "status": "error_change_reception_bad_date",
+                        "data": result.get("message", "Ошибка изменения даты приема")
+                    }
+
+                # Non-working time
+                elif result.get("status") == "nonworktime":
+                    return {"status": "nonworktime"}
+
+                # Unknown error
+                else:
+                    return {
+                        "status": "error_med_element",
+                        "message": result.get("message", "Ошибка медицинской системы")
+                    }
+
+            # Delete reception for patient (cancellation)
+            elif function_name == "delete_reception_for_patient":
+                if result.get("status") == "success_delete":
+                    return {
+                        "status": "success_deleting_reception",
+                        "message": "Запись успешно удалена"
+                    }
+                else:
+                    return {
+                        "status": "error_deleting_reception",
+                        "message": result.get("message", "Ошибка при удалении записи")
+                    }
+
+            # Appointment time for patient (current appointment info)
+            elif function_name == "appointment_time_for_patient":
+                if result.get("status") == "error_no_appointment":
+                    return {
+                        "status": "error_reception_unavailable",
+                        "message": "У пациента нет активных записей на прием"
+                    }
+
+                if "appointment_time" in result and "appointment_date" in result:
+                    time = result["appointment_time"]
+
+                    # Try to parse appointment date
+                    appt_date_obj = None
+                    try:
+                        appt_date_obj = datetime.strptime(result["appointment_date"], "%Y-%m-%d")
+                    except ValueError:
+                        pass
+
+                    if appt_date_obj:
+                        day = appt_date_obj.day
+                        month_num = appt_date_obj.month
+                        weekday_idx = appt_date_obj.weekday()
+
+                        # Determine if today or tomorrow
+                        today = datetime.now().date()
+                        tomorrow = today + timedelta(days=1)
+
+                        if appt_date_obj.date() == today:
+                            day_ru = "сегодня"
+                            day_kz = "бүгін"
+                        elif appt_date_obj.date() == tomorrow:
+                            day_ru = "завтра"
+                            day_kz = "ертең"
+                        else:
+                            day_ru = None
+                            day_kz = None
+
+                        response = {
+                            "status": "success_for_check_info",
+                            "date": f"{day} {MONTHS_RU[month_num]}",
+                            "date_kz": f"{day} {MONTHS_KZ[month_num]}",
+                            "specialist_name": result.get("doctor_name", "Специалист"),
+                            "weekday": WEEKDAYS_RU[weekday_idx],
+                            "weekday_kz": WEEKDAYS_KZ[weekday_idx],
+                            "time": time
+                        }
+
+                        if day_ru:
+                            response["day"] = day_ru
+                            response["day_kz"] = day_kz
+
+                        return response
+
+            # If we couldn't format properly, return original result with modifications
+            # Make sure at least the status is in a reasonable format
+            if "status" not in result or result["status"] == "success":
+                # Try to guess appropriate status
+                if function_name == "which_time_in_certain_day":
+                    result["status"] = "which_time"
+                    if relation == "today":
+                        result["status"] = "which_time_today"
+                    elif relation == "tomorrow":
+                        result["status"] = "which_time_tomorrow"
+                elif function_name == "reserve_reception_for_patient":
+                    result["status"] = "success_change_reception"
+                    if relation == "today":
+                        result["status"] = "success_change_reception_today"
+                    elif relation == "tomorrow":
+                        result["status"] = "success_change_reception_tomorrow"
+                elif function_name == "delete_reception_for_patient":
+                    result["status"] = "success_deleting_reception"
+                    if "message" not in result:
+                        result["message"] = "Запись успешно удалена"
+                elif function_name == "appointment_time_for_patient":
+                    result["status"] = "success_for_check_info"
+
+            # Add date info if missing and available
+            if date_info and isinstance(result, dict):
+                for key, value in date_info.items():
+                    if key not in result:
+                        result[key] = value
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error formatting ACS response: {e}", exc_info=True)
+            # Return a safe fallback response
+            return {
+                "status": "error_med_element",
+                "message": "Ошибка форматирования ответа"
+            }
 
             def format_date_info(date_str):
                 """Formats date for ACS response"""

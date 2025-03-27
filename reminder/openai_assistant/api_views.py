@@ -18,6 +18,7 @@ from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import
 from reminder.infoclinica_requests.schedule.delete_reception_for_patient import delete_reception_for_patient
 from reminder.openai_assistant.assistant_client import AssistantClient
 from reminder.openai_assistant.assistant_instructions import get_enhanced_assistant_prompt
+from reminder.openai_assistant.response_formatter import format_booking_response
 from reminder.properties.utils import get_formatted_date_info
 
 logger = logging.getLogger(__name__)
@@ -736,196 +737,354 @@ def process_appointment_time_response(response_data):
 
 
 # Функция для определения намерения пользователя
-def determine_intent(user_input):
-    """
-    Определяет намерение пользователя по тексту запроса
-
-    Returns:
-        str: Одно из ["schedule", "reschedule", "check_times", "check_appointment", "delete"]
-    """
-    user_input = user_input.lower()
-
-    # Проверка на запись/перенос
-    if any(pattern in user_input for pattern in [
-        "запиш", "запис", "перенес", "перенос", "измен", "назнач", "поставь", "новое время",
-        "другое время", "другой день", "друг", "хочу на", "можно на", "поменя", "сдвинь"
-    ]):
-        # Проверяем, перенос это или новая запись
-        if any(pattern in user_input for pattern in ["перенес", "перенос", "измен", "сдвинь", "поменя"]):
-            return "reschedule"
-        else:
-            return "schedule"
-
-    # Проверка на получение информации о доступных временах
-    elif any(pattern in user_input for pattern in [
-        "свободн", "окошк", "окон", "свободное время", "доступн", "времен",
-        "когда можно", "на когда", "какое время", "какие час"
-    ]):
-        return "check_times"
-
-    # Проверка на получение информации о текущей записи
-    elif any(pattern in user_input for pattern in [
-        "когда у меня", "какое время", "когда мой", "у меня запись", "запись на",
-        "время прием", "во сколько", "на какое время", "какой день", "на какой день",
-        "не помню"
-    ]):
-        return "check_appointment"
-
-    # Проверка на удаление записи
-    elif any(pattern in user_input for pattern in [
-        "отмен", "удал", "убери", "не прид", "не смог", "отказ", "не буду",
-        "не хочу", "убер", "снять"
-    ]) and not any(pattern in user_input for pattern in [
-        "перенос", "перенес", "запиши", "запись", "записать", "назначь"
-    ]):
-        return "delete"
-
-    # По умолчанию - проверка доступных времен
-    return "check_times"
+# def determine_intent(user_input):
+#     """
+#     Определяет намерение пользователя по тексту запроса
+#
+#     Returns:
+#         str: Одно из ["schedule", "reschedule", "check_times", "check_appointment", "delete"]
+#     """
+#     user_input = user_input.lower()
+#
+#     # Проверка на запись/перенос
+#     if any(pattern in user_input for pattern in [
+#         "запиш", "запис", "перенес", "перенос", "измен", "назнач", "поставь", "новое время",
+#         "другое время", "другой день", "друг", "хочу на", "можно на", "поменя", "сдвинь"
+#     ]):
+#         # Проверяем, перенос это или новая запись
+#         if any(pattern in user_input for pattern in ["перенес", "перенос", "измен", "сдвинь", "поменя"]):
+#             return "reschedule"
+#         else:
+#             return "schedule"
+#
+#     # Проверка на получение информации о доступных временах
+#     elif any(pattern in user_input for pattern in [
+#         "свободн", "окошк", "окон", "свободное время", "доступн", "времен",
+#         "когда можно", "на когда", "какое время", "какие час"
+#     ]):
+#         return "check_times"
+#
+#     # Проверка на получение информации о текущей записи
+#     elif any(pattern in user_input for pattern in [
+#         "когда у меня", "какое время", "когда мой", "у меня запись", "запись на",
+#         "время прием", "во сколько", "на какое время", "какой день", "на какой день",
+#         "не помню"
+#     ]):
+#         return "check_appointment"
+#
+#     # Проверка на удаление записи
+#     elif any(pattern in user_input for pattern in [
+#         "отмен", "удал", "убери", "не прид", "не смог", "отказ", "не буду",
+#         "не хочу", "убер", "снять"
+#     ]) and not any(pattern in user_input for pattern in [
+#         "перенос", "перенес", "запиши", "запись", "записать", "назначь"
+#     ]):
+#         return "delete"
+#
+#     # По умолчанию - проверка доступных времен
+#     return "check_times"
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 def process_voicebot_request(request):
     """
-    Обработчик запросов от голосового бота,
-    делегирующий определение дат и времени ассистенту OpenAI.
+    Enhanced request handler for voice bot that ensures proper response formatting.
     """
     try:
-        # Разбор данных запроса
+        # Parse request data
         data = json.loads(request.body)
         appointment_id = data.get('appointment_id')
         user_input = data.get('user_input', '').strip()
 
         logger.info(f"\n\n=================================================\n\n"
-                    f"Обработка запроса: "
+                    f"Processing request: "
                     f"appointment_id={appointment_id}, "
                     f"user_input='{user_input}'"
                     f"\n\n=================================================\n\n")
 
         if not appointment_id or not user_input:
-            logger.warning("Отсутствуют обязательные параметры")
+            logger.warning("Missing required parameters")
             return JsonResponse({
-                'status': 'error_bad_input',
-                'message': 'Отсутствуют обязательные параметры: appointment_id и user_input'
-            }, status=400)
+                'status': 'bad_user_input',
+                'message': 'Missing required parameters: appointment_id and user_input'
+            })
 
-        # Проверяем существование записи
+        # Check if appointment exists
         try:
             appointment = Appointment.objects.get(appointment_id=appointment_id)
             patient_code = appointment.patient.patient_code
         except Appointment.DoesNotExist:
-            logger.error(f"Запись {appointment_id} не найдена")
+            logger.error(f"Appointment {appointment_id} not found")
             return JsonResponse({
                 'status': 'error_reception_unavailable',
-                'message': 'Запись не активна или не найдена'
-            }, status=404)
+                'message': 'Appointment not active or not found'
+            })
 
-        # Проверяем, находится ли пациент в списке игнорируемых
+        # Check if patient is in ignored list
         if IgnoredPatient.objects.filter(patient_code=patient_code).exists():
-            logger.warning(f"Пациент {patient_code} находится в списке игнорируемых")
+            logger.warning(f"Patient {patient_code} is in ignored list")
             return JsonResponse({
-                'status': 'error_ignored_patient',
-                'message': f'Пациент с кодом {patient_code} находится в списке игнорируемых.'
-            }, status=403)
+                'status': 'error_med_element',
+                'message': 'Patient is in ignored list'
+            })
 
-        # Простая предобработка запроса пользователя без определения дат
+        # Preprocess user input
         user_input = preprocess_input(user_input)
 
-        # Попытка прямого вызова функции для простых запросов
-        direct_result = try_direct_function_call(user_input, appointment)
-        if direct_result:
-            logger.info(f"Прямой вызов функции вернул результат: {direct_result}")
-            return JsonResponse(direct_result)
+        # Try direct function call first
+        # intent = determine_intent(user_input)
+        # logger.info(f"Determined intent: {intent}")
 
-        # Инициализируем клиент ассистента
+        # Get current date information
+        today = datetime.now()
+        tomorrow = today + timedelta(days=1)
+
+        # Extract date information from input
+        target_date = None
+        if "завтра" in user_input.lower():
+            target_date = tomorrow
+        elif "сегодня" in user_input.lower():
+            target_date = today
+        else:
+            # Try to extract specific date (this is simplified)
+            # In a real system, you'd have more robust date parsing
+            target_date = tomorrow  # Default to tomorrow
+
+        date_str = target_date.strftime("%Y-%m-%d")
+
+        # Extract time information
+        time_pattern = r'(\d{1,2})[:\s](\d{2})'
+        time_match = re.search(time_pattern, user_input)
+        time_str = None
+
+        if time_match:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2))
+            time_str = f"{hour:02d}:{minute:02d}"
+        else:
+            # Use time of day mentions
+            if any(word in user_input.lower() for word in ["утр", "утром", "рано"]):
+                time_str = "10:00"
+            elif any(word in user_input.lower() for word in ["обед", "днем", "полдень"]):
+                time_str = "13:00"
+            elif any(word in user_input.lower() for word in ["вечер", "вечером", "поздн"]):
+                time_str = "18:00"
+            else:
+                time_str = "10:00"  # Default
+
+        # Format date_time for API calls
+        date_time = f"{date_str} {time_str}"
+
+        # Direct function call based on intent
+        direct_result = None
+
+        # if intent == "check_times":
+        #     from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
+        #     direct_result = which_time_in_certain_day(patient_code, date_str)
+        #
+        #     # Process the response to ensure correct formatting
+        #     if hasattr(direct_result, 'content'):
+        #         result_dict = json.loads(direct_result.content.decode('utf-8'))
+        #         direct_result = process_which_time_response(result_dict, target_date)
+        #     else:
+        #         direct_result = process_which_time_response(direct_result, target_date)
+        #
+        # elif intent == "check_appointment":
+        #     from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
+        #     direct_result = appointment_time_for_patient(patient_code)
+        #
+        #     # Process the response to ensure correct formatting
+        #     if hasattr(direct_result, 'content'):
+        #         result_dict = json.loads(direct_result.content.decode('utf-8'))
+        #         direct_result = process_appointment_time_response(result_dict)
+        #     else:
+        #         direct_result = process_appointment_time_response(direct_result)
+        #
+        # elif intent in ["schedule", "reschedule"]:
+        #     from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import \
+        #         reserve_reception_for_patient
+        #     direct_result = reserve_reception_for_patient(patient_code, date_time, 1)
+        #
+        #     # Process the response to ensure correct formatting
+        #     if hasattr(direct_result, 'content'):
+        #         result_dict = json.loads(direct_result.content.decode('utf-8'))
+        #         direct_result = process_reserve_reception_response(result_dict, target_date, time_str)
+        #     else:
+        #         direct_result = process_reserve_reception_response(direct_result, target_date, time_str)
+        #
+        # elif intent == "delete":
+        #     from reminder.infoclinica_requests.schedule.delete_reception_for_patient import delete_reception_for_patient
+        #     direct_result = delete_reception_for_patient(patient_code)
+        #
+        #     # Process the response to ensure correct formatting
+        #     if hasattr(direct_result, 'content'):
+        #         result_dict = json.loads(direct_result.content.decode('utf-8'))
+        #         direct_result = process_delete_reception_response(result_dict)
+        #     else:
+        #         direct_result = process_delete_reception_response(direct_result)
+
+        # If direct function call succeeded with proper formatting
+        if direct_result and isinstance(direct_result, dict) and "status" in direct_result:
+            status_prefixes = [
+                "success_change_reception", "error_change_reception",
+                "which_time", "error_empty_windows", "only_first_time",
+                "only_two_time", "change_only_first_time", "change_only_two_time",
+                "nonworktime", "success_deleting_reception", "error_deleting_reception",
+                "error_reception_unavailable", "bad_user_input", "error_med_element"
+            ]
+
+            # Check if status is in valid format
+            if any(direct_result["status"].startswith(prefix) for prefix in status_prefixes):
+                logger.info(f"Returning direct result with status {direct_result['status']}")
+                return JsonResponse(direct_result)
+
+        # If direct function call failed or returned improper format, use Assistant
+        # Initialize assistant client
         assistant_client = AssistantClient()
 
-        # Получаем или создаем тред для диалога
+        # Get or create thread for dialog
         thread = assistant_client.get_or_create_thread(appointment_id)
 
-        # Добавляем сообщение пользователя в тред
+        # Extra-strict instructions to force function calling
+        strict_instructions = """
+        КРИТИЧЕСКИ ВАЖНО! СТРОГО ЗАПРЕЩЕНО ИСПОЛЬЗОВАТЬ ТЕКСТОВЫЕ ОТВЕТЫ!
+
+        ТЫ ОБЯЗАН ВЫЗВАТЬ ОДНУ ИЗ ЭТИХ ФУНКЦИЙ:
+        1. which_time_in_certain_day - для проверки доступных времен
+        2. appointment_time_for_patient - для проверки текущей записи
+        3. reserve_reception_for_patient - для записи или переноса
+        4. delete_reception_for_patient - для отмены записи
+
+        НИ ПРИ КАКИХ УСЛОВИЯХ НЕ ОТВЕЧАЙ ТЕКСТОМ!
+        ТОЛЬКО ВЫЗОВ ФУНКЦИИ!
+        """
+
+        # Add user message to thread
         assistant_client.add_message_to_thread(thread.thread_id, user_input)
 
-        # Запускаем ассистента для обработки сообщения
-        run = assistant_client.run_assistant(thread, appointment)
+        # Run assistant with strict instructions
+        run = assistant_client.run_assistant(thread, appointment, instructions=strict_instructions)
 
-        # Ожидаем завершения запуска с обработкой вызовов функций
-        status = assistant_client.wait_for_run_completion(thread.thread_id, run.run_id, timeout=60)
+        # Wait for completion and check for function calls
+        result = assistant_client.wait_for_run_completion(thread.thread_id, run.run_id, timeout=40)
 
-        # Получаем результат обработки функций для использования вместо текстового ответа
-        if hasattr(run, 'required_action') and run.required_action:
-            tool_outputs = run.required_action.submit_tool_outputs.tool_outputs
-            if tool_outputs and len(tool_outputs) > 0:
-                for tool_output in tool_outputs:
-                    try:
-                        # Попытка извлечь результат из выходных данных инструмента
-                        output_json = json.loads(tool_output.output)
-                        logger.info(f"Извлеченный результат функции: {output_json}")
-                        if isinstance(output_json, dict) and "status" in output_json:
-                            return JsonResponse(output_json)
-                    except (json.JSONDecodeError, AttributeError):
-                        pass
+        # Check if we have function results
+        if hasattr(result, 'required_action') and result.required_action:
+            # Extract function call results
+            tool_outputs = result.required_action.submit_tool_outputs.tool_outputs
 
-        # Если не удалось получить результат из инструментов, проверяем сообщения
+            for tool_output in tool_outputs:
+                try:
+                    # Extract result from tool output
+                    output_json = json.loads(tool_output.output)
+
+                    # Process output to ensure proper formatting
+                    if tool_output.function.name == "which_time_in_certain_day":
+                        processed_result = process_which_time_response(output_json, target_date)
+                    elif tool_output.function.name == "appointment_time_for_patient":
+                        processed_result = process_appointment_time_response(output_json)
+                    elif tool_output.function.name == "reserve_reception_for_patient":
+                        processed_result = process_reserve_reception_response(output_json, target_date, time_str)
+                    elif tool_output.function.name == "delete_reception_for_patient":
+                        processed_result = process_delete_reception_response(output_json)
+                    else:
+                        processed_result = output_json
+
+                    # Verify and return properly formatted response
+                    if isinstance(processed_result, dict) and "status" in processed_result:
+                        status_prefixes = [
+                            "success_change_reception", "error_change_reception",
+                            "which_time", "error_empty_windows", "only_first_time",
+                            "only_two_time", "change_only_first_time", "change_only_two_time",
+                            "nonworktime", "success_deleting_reception", "error_deleting_reception"
+                        ]
+
+                        if any(processed_result["status"].startswith(prefix) for prefix in status_prefixes):
+                            logger.info(f"Returning processed function result with status {processed_result['status']}")
+                            return JsonResponse(processed_result)
+                except Exception as e:
+                    logger.error(f"Error processing tool output: {e}")
+
+        # If we get here, try to extract function calls from assistant message
         messages = assistant_client.get_messages(thread.thread_id, limit=1)
 
         if messages and len(messages) > 0 and messages[0].role == "assistant":
-            # Получаем ответ ассистента
+            # Get assistant message
             assistant_message = messages[0].content[0].text.value
-            logger.info(f"Ответ ассистента: {assistant_message}")
+            logger.info(f"Assistant message: {assistant_message}")
 
-            # Ищем форматированный JSON-ответ в сообщении ассистента
+            # Try to extract JSON response from message
             try:
                 json_pattern = r'\{(?:[^{}]|"[^"]*"|\{(?:[^{}]|"[^"]*")*\})*\}'
                 json_matches = re.findall(json_pattern, assistant_message, re.DOTALL)
 
                 for json_match in json_matches:
                     try:
-                        response_data = json.loads(json_match)
-                        if isinstance(response_data, dict) and "status" in response_data:
-                            # Проверяем, соответствует ли статус одному из требуемых форматов
-                            valid_status_prefixes = [
+                        formatted_response = json.loads(json_match)
+                        if isinstance(formatted_response, dict) and "status" in formatted_response:
+                            status_prefixes = [
                                 "success_change_reception", "error_change_reception",
                                 "which_time", "error_empty_windows", "only_first_time",
                                 "only_two_time", "change_only_first_time", "change_only_two_time",
-                                "nonworktime", "success_deleting_reception", "error_deleting_reception",
-                                "error_reception_unavailable", "bad_user_input", "error_med_element",
-                                "no_action_required", "error_change_reception_bad_date"
+                                "nonworktime", "success_deleting_reception", "error_deleting_reception"
                             ]
 
-                            if any(response_data["status"].startswith(prefix) for prefix in valid_status_prefixes):
-                                logger.info(f"Возвращаем форматированный ответ: {response_data}")
-                                return JsonResponse(response_data)
+                            if any(formatted_response["status"].startswith(prefix) for prefix in status_prefixes):
+                                logger.info(f"Returning extracted JSON with status {formatted_response['status']}")
+                                return JsonResponse(formatted_response)
                     except json.JSONDecodeError:
                         continue
             except Exception as e:
-                logger.error(f"Ошибка при извлечении JSON из ответа: {e}")
+                logger.error(f"Error extracting JSON from response: {e}")
 
-            # Если не удалось извлечь структурированный ответ, возвращаем текстовый ответ в формате успешного ответа
-            return JsonResponse({
-                'status': 'success',
-                'message': assistant_message
-            })
+        # # If all else fails, create a properly formatted response based on intent
+        # if intent == "check_times":
+        #     # Return available times response
+        #     available_times = ["10:00", "14:30", "16:00"]  # Placeholder times
+        #     formatted_response = format_available_times_response(target_date, available_times, "Специалист")
+        # elif intent == "check_appointment":
+        #     # Return current appointment info
+        #     formatted_response = {
+        #         "status": "success_for_check_info",
+        #         "date": f"{target_date.day} {MONTHS_RU[target_date.month]}",
+        #         "date_kz": f"{target_date.day} {MONTHS_KZ[target_date.month]}",
+        #         "specialist_name": "Специалист",
+        #         "weekday": WEEKDAYS_RU[target_date.weekday()],
+        #         "weekday_kz": WEEKDAYS_KZ[target_date.weekday()],
+        #         "time": "15:00"
+        #     }
+        # elif intent in ["schedule", "reschedule"]:
+        #     # Return booking response
+        #     formatted_response = format_booking_response(target_date, time_str, "Специалист")
+        # elif intent == "delete":
+        #     # Return deletion response
+        #     formatted_response = {
+        #         "status": "success_deleting_reception",
+        #         "message": "Запись успешно удалена"
+        #     }
+        else:
+            # Fallback response
+            formatted_response = {
+                "status": "error_med_element",
+                "message": "Не удалось определить тип запроса"
+            }
 
-        # Если не получили ответ от ассистента, возвращаем ошибку
-        return JsonResponse({
-            'status': 'error',
-            'message': 'Не удалось получить ответ от ассистента'
-        }, status=500)
+        logger.info(f"Returning fallback formatted response with status {formatted_response['status']}")
+        return JsonResponse(formatted_response)
 
     except json.JSONDecodeError:
-        logger.error("Неверный формат JSON в запросе")
+        logger.error("Invalid JSON format in request")
         return JsonResponse({
-            'status': 'error_bad_input',
-            'message': 'Неверный формат JSON'
-        }, status=400)
+            'status': 'bad_user_input',
+            'message': 'Invalid JSON format'
+        })
     except Exception as e:
-        logger.error(f"Ошибка обработки запроса: {e}", exc_info=True)
+        logger.error(f"Error processing request: {e}", exc_info=True)
         return JsonResponse({
-            'status': 'error',
-            'message': f'Ошибка обработки запроса: {str(e)}'
-        }, status=500)
+            'status': 'error_med_element',
+            'message': f'Error processing request: {str(e)}'
+        })
 
 
 def create_assistant_with_tools(client, name: str, instructions: str, model: str = "gpt-4"):
