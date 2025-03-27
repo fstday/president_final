@@ -306,7 +306,8 @@ class AssistantClient:
 
     def _call_function(self, function_name: str, function_args: dict, thread_id: str = None) -> dict:
         """
-        Улучшенная функция для правильного вызова функций управления записями на прием.
+        Улучшенная функция для вызова нужных функций с параметрами, определенными ассистентом.
+        С улучшенной поддержкой относительных дат и времени.
 
         Args:
             function_name: Имя функции
@@ -326,36 +327,6 @@ class AssistantClient:
         try:
             logger.info(f"Вызываем функцию {function_name} с аргументами: {function_args}")
 
-            # Обработка относительных дат
-            if function_name == "reserve_reception_for_patient":
-                date_from_patient = function_args.get("date_from_patient", "")
-                patient_id = function_args.get("patient_id")
-
-                # Обработка относительных дат
-                if isinstance(date_from_patient, str) and "через" in date_from_patient.lower():
-                    # Парсинг "через неделю", "через 3 дня" и т.д.
-                    relative_date = self._parse_relative_date(date_from_patient)
-                    if relative_date:
-                        function_args["date_from_patient"] = relative_date
-
-                # Обработка указаний времени суток
-                if isinstance(date_from_patient, str) and not re.search(r'\d{1,2}:\d{2}', date_from_patient):
-                    # Проверяем наличие указаний на время суток
-                    date_part = date_from_patient.split()[0] if ' ' in date_from_patient else date_from_patient
-                    time_of_day = self._extract_time_of_day(date_from_patient.lower())
-                    if time_of_day:
-                        # Сопоставляем время суток с конкретным часом
-                        specific_time = ""
-                        if "утр" in time_of_day:
-                            specific_time = "10:30"
-                        elif "обед" in time_of_day:
-                            specific_time = "13:30"
-                        elif "вечер" in time_of_day or "ужин" in time_of_day:
-                            specific_time = "18:30"
-
-                        if specific_time:
-                            function_args["date_from_patient"] = f"{date_part} {specific_time}"
-
             # СЛУЧАЙ 1: Удаление записи
             if function_name == "delete_reception_for_patient":
                 patient_id = function_args.get("patient_id")
@@ -368,49 +339,6 @@ class AssistantClient:
                 date_from_patient = function_args.get("date_from_patient", "")
                 trigger_id = function_args.get("trigger_id", 1)
 
-                # Process relative dates
-                if isinstance(date_from_patient, str) and "через" in date_from_patient.lower():
-                    # Parsing "через неделю", "через 3 дня" etc.
-                    relative_date = self._parse_relative_date(date_from_patient)
-                    if relative_date:
-                        function_args["date_from_patient"] = relative_date
-
-                # Handle time of day references
-                if isinstance(date_from_patient, str) and not re.search(r'\d{1,2}:\d{2}', date_from_patient):
-                    # Check for time of day references
-                    date_part = date_from_patient.split()[0] if ' ' in date_from_patient else date_from_patient
-                    time_of_day = self._extract_time_of_day(date_from_patient.lower())
-                    if time_of_day:
-                        # Map time of day to specific hour
-                        specific_time = ""
-                        if "утр" in time_of_day:
-                            specific_time = "10:30"
-                        elif "обед" in time_of_day:
-                            specific_time = "13:30"
-                        elif "вечер" in time_of_day or "ужин" in time_of_day:
-                            specific_time = "18:30"
-
-                        if specific_time:
-                            function_args["date_from_patient"] = f"{date_part} {specific_time}"
-
-                # ADD THIS NEW SECTION FOR TIME ROUNDING:
-                # Process and round the appointment time if needed
-                if isinstance(date_from_patient, str) and " " in date_from_patient:
-                    # Split date and time
-                    date_parts = date_from_patient.split()
-                    date_part = date_parts[0]
-                    time_part = date_parts[1] if len(date_parts) > 1 else ""
-
-                    if time_part and ":" in time_part:
-                        # Round time to nearest half-hour
-                        rounded_time = self._round_to_nearest_half_hour(time_part)
-
-                        if rounded_time != time_part:
-                            logger.info(f"Rounded appointment time from {time_part} to {rounded_time}")
-
-                        # Update the argument with rounded time
-                        function_args["date_from_patient"] = f"{date_part} {rounded_time}"
-
                 # Check mandatory parameters
                 if not patient_id:
                     return {
@@ -419,8 +347,8 @@ class AssistantClient:
                     }
 
                 logger.info(
-                    f"Creating/rescheduling appointment for patient {patient_id} at {function_args['date_from_patient']}")
-                return reserve_reception_for_patient(patient_id, function_args["date_from_patient"], trigger_id)
+                    f"Creating/rescheduling appointment for patient {patient_id} at {date_from_patient}")
+                return reserve_reception_for_patient(patient_id, date_from_patient, trigger_id)
 
             # СЛУЧАЙ 3: Получение информации о текущей записи
             elif function_name == "appointment_time_for_patient":
@@ -434,7 +362,98 @@ class AssistantClient:
                     }
 
                 logger.info(f"Получаем информацию о текущей записи для пациента {patient_code}")
-                return appointment_time_for_patient(patient_code, year_from_patient_for_returning)
+                # Получаем данные о текущей записи
+                result = appointment_time_for_patient(patient_code, year_from_patient_for_returning)
+
+                # Если это прямой запрос информации о записи - возвращаем результат
+                user_message = self._get_last_user_message(thread_id) if thread_id else ""
+                if any(keyword in user_message.lower() for keyword in [
+                    'когда', 'какое время', 'во сколько', 'какого числа', 'не помню',
+                    'напомните', 'на какое число', 'когда моя запись'
+                ]):
+                    return result
+
+                # Для запросов на перенос "раньше" или "позже" проводим дополнительную обработку
+                # Первый шаг алгоритма для переноса записи - запрос текущего времени
+                if any(keyword in user_message.lower() for keyword in [
+                    'раньше', 'позже', 'пораньше', 'попозже', 'перенесите', 'перенести'
+                ]):
+                    # Проверяем, есть ли у пациента активная запись
+                    if not isinstance(result, dict) or result.get('status') == 'error_no_appointment':
+                        return {
+                            'status': 'error',
+                            'message': 'У пациента нет активных записей для переноса'
+                        }
+
+                    # Проверяем, содержит ли ответ информацию о времени записи
+                    if isinstance(result, dict) and 'appointment_time' in result and 'appointment_date' in result:
+                        current_time = result['appointment_time']
+                        current_date = result['appointment_date']
+
+                        # Запрашиваем доступные времена на эту дату
+                        available_times_response = which_time_in_certain_day(patient_code, current_date)
+
+                        # Преобразуем в словарь, если нужно
+                        if not isinstance(available_times_response, dict) and hasattr(available_times_response,
+                                                                                      'content'):
+                            available_times_response = json.loads(available_times_response.content.decode('utf-8'))
+
+                        # Извлекаем список доступных времен
+                        available_times = []
+                        if isinstance(available_times_response, dict):
+                            if 'all_available_times' in available_times_response:
+                                available_times = [time.split(' ')[1] if ' ' in time else time
+                                                   for time in available_times_response.get('all_available_times', [])]
+                            else:
+                                # Собираем времена из разных полей
+                                for key in available_times_response:
+                                    if key.startswith('time_') or key in ['first_time', 'second_time', 'third_time']:
+                                        if available_times_response[key]:
+                                            time_value = available_times_response[key]
+                                            time_value = time_value.split(' ')[1] if ' ' in time_value else time_value
+                                            available_times.append(time_value)
+
+                        # Если нет доступных времен - сообщаем об ошибке
+                        if not available_times:
+                            return {
+                                'status': 'error',
+                                'message': f'Нет доступных времен для переноса записи на {current_date}'
+                            }
+
+                        # Определяем "раньше" или "позже" относительно текущего времени
+                        is_earlier = any(kw in user_message.lower() for kw in ['раньше', 'пораньше'])
+
+                        # Сортируем времена
+                        sorted_times = sorted(available_times)
+
+                        # Выбираем подходящее время
+                        chosen_time = None
+
+                        if is_earlier:
+                            # Для "раньше" - ищем ближайшее время ДО текущего
+                            earlier_times = [t for t in sorted_times if t < current_time]
+                            if earlier_times:
+                                chosen_time = earlier_times[-1]  # Берем последнее (ближайшее к текущему)
+                        else:
+                            # Для "позже" - ищем ближайшее время ПОСЛЕ текущего
+                            later_times = [t for t in sorted_times if t > current_time]
+                            if later_times:
+                                chosen_time = later_times[0]  # Берем первое (ближайшее к текущему)
+
+                        # Если нашли подходящее время - делаем запись
+                        if chosen_time:
+                            new_datetime = f"{current_date} {chosen_time}"
+                            return reserve_reception_for_patient(patient_id=patient_code,
+                                                                 date_from_patient=new_datetime,
+                                                                 trigger_id=1)
+                        else:
+                            return {
+                                'status': 'error',
+                                'message': f'Нет доступных времен {"до" if is_earlier else "после"} '
+                                           f'{current_time} на {current_date}'
+                            }
+
+                return result
 
             # СЛУЧАЙ 4: Получение доступных временных слотов
             elif function_name == "which_time_in_certain_day":
@@ -448,12 +467,15 @@ class AssistantClient:
                         "message": "Не указаны обязательные параметры (patient_code или date_time)"
                     }
 
-                # Преобразование "today" в текущую дату
+                # Нормализация значений
                 if date_time.lower() == "today":
                     date_time = datetime.now().strftime("%Y-%m-%d")
-                # Преобразование "tomorrow" в завтрашнюю дату
                 elif date_time.lower() == "tomorrow":
                     date_time = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+                elif date_time.lower() == "day_after_tomorrow" or date_time.lower() == "послезавтра":
+                    date_time = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
+                elif date_time.lower() == "after_day_after_tomorrow" or date_time.lower() == "после_послезавтра":
+                    date_time = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
 
                 logger.info(f"Получаем доступные временные слоты для пациента {patient_code} на дату {date_time}")
 
@@ -499,6 +521,14 @@ class AssistantClient:
                                 if time_key in available_times_result and available_times_result[time_key]:
                                     times.append(available_times_result[time_key])
 
+                            available_times = times
+
+                        # Вариант 3: first_time, second_time, third_time
+                        elif any(key in available_times_result for key in ["first_time", "second_time", "third_time"]):
+                            times = []
+                            for key in ["first_time", "second_time", "third_time"]:
+                                if key in available_times_result and available_times_result[key]:
+                                    times.append(available_times_result[key])
                             available_times = times
 
                     # Если нашли доступные времена - ОБЯЗАТЕЛЬНО выбираем одно и записываем

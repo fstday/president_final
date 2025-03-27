@@ -18,6 +18,7 @@ from reminder.infoclinica_requests.schedule.which_time_in_certain_day import whi
 from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
 from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import reserve_reception_for_patient
 from reminder.infoclinica_requests.schedule.delete_reception_for_patient import delete_reception_for_patient
+from reminder.openai_assistant.assistant_client import AssistantClient
 from reminder.openai_assistant.assistant_instructions import get_enhanced_assistant_prompt
 from reminder.properties.utils import get_formatted_date_info
 
@@ -572,8 +573,8 @@ def determine_intent(user_input):
 @require_http_methods(["POST"])
 def process_voicebot_request(request):
     """
-    Полная реализация обработчика запросов от голосового бота
-    с корректной обработкой всех статусов и форматированием ответов
+    Обработчик запросов от голосового бота,
+    делегирующий определение дат и времени ассистенту OpenAI.
     """
     try:
         # Разбор данных запроса
@@ -613,166 +614,59 @@ def process_voicebot_request(request):
                 'message': f'Пациент с кодом {patient_code} находится в списке игнорируемых.'
             }, status=403)
 
-        # Предобработка запроса пользователя
-        processed_input = preprocess_input(user_input)
+        # Простая предобработка запроса пользователя без определения дат
+        user_input = preprocess_input(user_input)
 
-        # Определение намерения пользователя
-        intent = determine_intent(processed_input)
-        logger.info(f"Определено намерение: {intent}")
+        # Попытка прямого вызова функции для простых запросов
+        direct_result = try_direct_function_call(user_input, appointment)
+        if direct_result:
+            logger.info(f"Прямой вызов функции вернул результат: {direct_result}")
+            return JsonResponse(direct_result)
 
-        # Специалист по умолчанию (если нет в записи)
-        specialist_name = "Специалист"
-        if appointment.doctor:
-            specialist_name = appointment.doctor.full_name
+        # Инициализируем клиент ассистента
+        assistant_client = AssistantClient()
 
-        # Обработка в зависимости от намерения
-        if intent in ["schedule", "reschedule"]:
-            # Извлекаем дату из запроса с учетом относительных дат
-            date_obj = extract_date_from_text(processed_input)
+        # Получаем или создаем тред для диалога
+        thread = assistant_client.get_or_create_thread(appointment_id)
 
-            # Логируем определенную дату для контроля
-            logger.info(f"Определена дата: {date_obj.strftime('%Y-%m-%d')}")
+        # Добавляем сообщение пользователя в тред
+        assistant_client.add_message_to_thread(thread.thread_id, user_input)
 
-            # Проверяем, указал ли пользователь конкретное время
-            explicit_time = re.search(r'(\d{1,2})[:\s](\d{2})', processed_input) or any(
-                keyword in processed_input for keyword in ["утр", "обед", "вечер"])
+        # Запускаем ассистента для обработки сообщения
+        run = assistant_client.run_assistant(thread, appointment)
 
-            if not explicit_time:
-                # Если пользователь НЕ указал конкретное время
-                logger.info("Пользователь не указал конкретное время, проверяем доступные времена")
+        # Ожидаем завершения запуска с обработкой вызовов функций
+        status = assistant_client.wait_for_run_completion(thread.thread_id, run.run_id, timeout=60)
 
-                # Сначала получаем список доступных времен на указанную дату
-                formatted_date = date_obj.strftime('%Y-%m-%d')
-                available_times_result = which_time_in_certain_day(patient_code, formatted_date)
+        # Получаем сообщения из треда, включая ответ ассистента
+        messages = assistant_client.get_messages(thread.thread_id, limit=1)
 
-                # Преобразуем JsonResponse в dict при необходимости
-                if not isinstance(available_times_result, dict) and hasattr(available_times_result, 'content'):
-                    available_times_result = json.loads(available_times_result.content.decode('utf-8'))
+        if messages and len(messages) > 0 and messages[0].role == "assistant":
+            # Получаем ответ ассистента
+            assistant_message = messages[0].content[0].text.value
+            logger.info(f"Ответ ассистента: {assistant_message}")
 
-                # Извлекаем доступные времена
-                available_times = []
+            # Проверяем, содержит ли ответ JSON-структуру
+            try:
+                # Попытка извлечь JSON из ответа ассистента, если он есть
+                json_match = re.search(r'{.*}', assistant_message, re.DOTALL)
+                if json_match:
+                    response_data = json.loads(json_match.group(0))
+                    return JsonResponse(response_data)
+            except json.JSONDecodeError:
+                pass
 
-                # Проверяем разные варианты полей с временами
-                if "all_available_times" in available_times_result and isinstance(
-                        available_times_result["all_available_times"], list):
-                    available_times = available_times_result["all_available_times"]
-                else:
-                    # Проверяем поля first_time, second_time, third_time
-                    for key in ["first_time", "second_time", "third_time"]:
-                        if key in available_times_result and available_times_result[key]:
-                            available_times.append(available_times_result[key])
+            # Если не смогли извлечь JSON, возвращаем текстовый ответ
+            return JsonResponse({
+                'status': 'success',
+                'message': assistant_message
+            })
 
-                    # Проверяем поля time_1, time_2, time_3...
-                    for i in range(1, 10):
-                        key = f"time_{i}"
-                        if key in available_times_result and available_times_result[key]:
-                            available_times.append(available_times_result[key])
-
-                # Если есть доступные времена, выбираем первое и делаем запись
-                if available_times:
-                    time_str = available_times[0]
-                    logger.info(f"Автоматически выбираем первое доступное время: {time_str}")
-
-                    # Если время в формате "YYYY-MM-DD HH:MM", извлекаем только время
-                    if " " in time_str:
-                        time_str = time_str.split(" ")[1]
-                else:
-                    # Если нет доступных времен, используем значение по умолчанию
-                    time_str = "10:00"
-                    logger.info(f"Нет доступных времен, используем время по умолчанию: {time_str}")
-            else:
-                # Если пользователь указал конкретное время
-                time_str = extract_time_from_text(processed_input)
-                logger.info(f"Пользователь указал время: {time_str}")
-
-            # Форматируем дату и время для API
-            formatted_datetime = f"{date_obj.strftime('%Y-%m-%d')} {time_str}"
-            logger.info(f"Запрос на запись/перенос на: {formatted_datetime}")
-
-            # Вызываем функцию записи/переноса
-            trigger_id = 1  # Стандартный режим записи
-            result = reserve_reception_for_patient(
-                patient_id=patient_code,
-                date_from_patient=formatted_datetime,
-                trigger_id=trigger_id
-            )
-
-            # Обрабатываем ответ
-            if isinstance(result, dict):
-                response = process_reserve_reception_response(result, date_obj, time_str)
-            else:
-                # Если result не словарь, а JsonResponse
-                result_dict = json.loads(result.content.decode('utf-8'))
-                response = process_reserve_reception_response(result_dict, date_obj, time_str)
-
-            return JsonResponse(response)
-
-        elif intent == "check_times":
-            # Извлекаем дату из запроса
-            date_obj = extract_date_from_text(processed_input)
-
-            # Форматируем дату для API
-            formatted_date = date_obj.strftime('%Y-%m-%d')
-            logger.info(f"Запрос на проверку доступных времен на: {formatted_date}")
-
-            # Вызываем функцию проверки доступных времен
-            result = which_time_in_certain_day(patient_code, formatted_date)
-
-            # Обрабатываем ответ
-            if isinstance(result, dict):
-                response = process_which_time_response(result, date_obj)
-            else:
-                # Если result не словарь, а JsonResponse
-                result_dict = json.loads(result.content.decode('utf-8'))
-                response = process_which_time_response(result_dict, date_obj)
-
-            return JsonResponse(response)
-
-        elif intent == "check_appointment":
-            logger.info("Запрос на проверку текущей записи")
-
-            # Вызываем функцию проверки текущей записи
-            result = appointment_time_for_patient(patient_code)
-
-            # Возвращаем ответ без изменений - он уже форматирован правильно
-            if isinstance(result, dict):
-                return JsonResponse(result)
-            else:
-                # Если result это JsonResponse
-                return result
-
-        elif intent == "delete":
-            logger.info("Запрос на удаление записи")
-
-            # Вызываем функцию удаления записи
-            result = delete_reception_for_patient(patient_code)
-
-            # Обрабатываем ответ
-            if isinstance(result, dict):
-                response = process_delete_reception_response(result)
-            else:
-                # Если result не словарь, а JsonResponse
-                result_dict = json.loads(result.content.decode('utf-8'))
-                response = process_delete_reception_response(result_dict)
-
-            return JsonResponse(response)
-
-        # Если не удалось определить намерение точно - отправляем запрос на проверку доступных времен
-        today = datetime.now()
-        formatted_date = today.strftime('%Y-%m-%d')
-        logger.info(f"Нечеткий запрос, проверяем доступные времена на сегодня: {formatted_date}")
-
-        result = which_time_in_certain_day(patient_code, formatted_date)
-
-        # Обрабатываем ответ
-        if isinstance(result, dict):
-            response = process_which_time_response(result, today)
-        else:
-            # Если result не словарь, а JsonResponse
-            result_dict = json.loads(result.content.decode('utf-8'))
-            response = process_which_time_response(result_dict, today)
-
-        return JsonResponse(response)
+        # Если не получили ответ от ассистента, возвращаем ошибку
+        return JsonResponse({
+            'status': 'error',
+            'message': 'Не удалось получить ответ от ассистента'
+        }, status=500)
 
     except json.JSONDecodeError:
         logger.error("Неверный формат JSON в запросе")
@@ -957,7 +851,8 @@ def preprocess_user_input(text: str) -> str:
 
 def try_direct_function_call(user_input: str, appointment) -> dict:
     """
-    Пытается напрямую определить и вызвать нужную функцию для определенных типов запросов.
+    Пытается напрямую определить и вызвать нужную функцию только для простых запросов.
+    Для сложных запросов с относительными датами или временем делегирует обработку ассистенту.
 
     Args:
         user_input: Запрос пользователя
@@ -969,17 +864,25 @@ def try_direct_function_call(user_input: str, appointment) -> dict:
     user_input = user_input.lower()
     patient_code = appointment.patient.patient_code
 
-    # Импортируем функции
-    from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
-    from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
-    from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import reserve_reception_for_patient
-    from reminder.infoclinica_requests.schedule.delete_reception_for_patient import delete_reception_for_patient
+    # Проверяем наличие сложных временных выражений
+    complex_time_expressions = [
+        "после завтра", "послезавтра", "после после",
+        "через неделю", "через месяц", "через день", "через два", "через 2",
+        "на следующей", "следующий", "следующую", "следующее",
+        "на этой", "этот", "эту", "это", "понедельник", "вторник", "среду", "четверг",
+        "пятницу", "субботу", "воскресенье", "выходные", "будни", "раньше", "позже"
+    ]
 
-    # 1. Запрос текущей записи
+    # Если обнаружены сложные временные выражения - делегируем ассистенту
+    if any(expr in user_input for expr in complex_time_expressions):
+        return None
+
+    # 1. Запрос текущей записи - простой случай
     if any(phrase in user_input for phrase in [
         'когда у меня запись', 'на какое время я записан', 'когда мой прием',
         'на какое время моя запись', 'когда мне приходить'
     ]):
+        from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
         logger.info("Прямой вызов функции appointment_time_for_patient")
         result = appointment_time_for_patient(patient_code)
         # Преобразуем JsonResponse в dict при необходимости
@@ -987,11 +890,12 @@ def try_direct_function_call(user_input: str, appointment) -> dict:
             return json.loads(result.content.decode('utf-8'))
         return result
 
-    # 2. Запрос на отмену записи
+    # 2. Запрос на отмену записи - простой случай
     if any(phrase in user_input for phrase in [
         'отмени', 'отменить', 'удали', 'удалить', 'убрать запись',
         'не хочу приходить', 'отказаться от записи'
-    ]):
+    ]) and not any(word in user_input for word in ['перенеси', 'перенести']):
+        from reminder.infoclinica_requests.schedule.delete_reception_for_patient import delete_reception_for_patient
         logger.info("Прямой вызов функции delete_reception_for_patient")
         result = delete_reception_for_patient(patient_code)
         # Преобразуем JsonResponse в dict при необходимости
@@ -999,27 +903,30 @@ def try_direct_function_call(user_input: str, appointment) -> dict:
             return json.loads(result.content.decode('utf-8'))
         return result
 
-    # 3. Запрос доступных времен
+    # 3. Запрос доступных времен ТОЛЬКО для сегодня/завтра - простой случай
     if any(phrase in user_input for phrase in [
         'свободные окошки', 'доступное время', 'какие времена', 'когда можно записаться',
         'доступные времена', 'свободное время', 'когда свободно'
     ]):
-        logger.info("Прямой вызов функции which_time_in_certain_day")
-
         # Определяем, для какой даты нужны слоты
-        if 'завтра' in user_input:
+        from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
+
+        if 'завтра' in user_input and 'после' not in user_input and 'послезавтра' not in user_input:
             date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            logger.info(f"Прямой вызов функции which_time_in_certain_day для завтра ({date})")
+            result = which_time_in_certain_day(patient_code, date)
         elif 'сегодня' in user_input:
             date = datetime.now().strftime("%Y-%m-%d")
+            logger.info(f"Прямой вызов функции which_time_in_certain_day для сегодня ({date})")
+            result = which_time_in_certain_day(patient_code, date)
         else:
-            # По умолчанию - сегодня
-            date = datetime.now().strftime("%Y-%m-%d")
+            # В случае неопределенности или других дат - делегируем ассистенту
+            return None
 
-        result = which_time_in_certain_day(patient_code, date)
         # Преобразуем JsonResponse в dict при необходимости
         if hasattr(result, 'content'):
             return json.loads(result.content.decode('utf-8'))
         return result
 
-    # В остальных случаях используем ассистента
+    # В остальных случаях - делегируем ассистенту
     return None
