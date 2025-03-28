@@ -71,65 +71,108 @@ class AssistantClient:
 
     def get_or_create_thread(self, appointment_id: int) -> Thread:
         """
-        Получает существующий тред или создает новый для диалога с пациентом.
+        Gets an existing thread or creates a new one for a dialog with a patient.
+        Enhanced with better error handling for stuck threads.
 
         Args:
-            appointment_id: ID записи на прием
+            appointment_id: Appointment ID
 
         Returns:
-            Thread: Объект треда для диалога
+            Thread: Thread object for the dialog
         """
         try:
-            # Проверяем, существует ли запись на прием
+            # Check if appointment exists
             appointment = Appointment.objects.get(appointment_id=appointment_id)
 
-            # Ищем активный тред для этой записи
-            thread = Thread.objects.filter(
+            # Check if there's an active thread for this appointment
+            existing_thread = Thread.objects.filter(
                 appointment_id=appointment_id,
                 expires_at__gt=timezone.now()
             ).first()
 
-            if thread:
-                logger.info(f"Найден существующий тред {thread.thread_id} для записи {appointment_id}")
-                return thread
+            if existing_thread:
+                logger.info(f"Found existing thread {existing_thread.thread_id} for appointment {appointment_id}")
 
-            # Если активный тред не найден, создаем новый
-            assistant = Assistant.objects.first()  # Получаем первого ассистента из БД
-            if not assistant:
-                logger.error("Ассистенты не найдены в базе данных")
-                raise ValueError("Ассистенты не найдены в базе данных")
+                # Before returning, check if this thread has an active run by making a call to the API
+                try:
+                    # Get the most recent run for this thread
+                    runs = self.client.beta.threads.runs.list(
+                        thread_id=existing_thread.thread_id,
+                        limit=1
+                    )
 
-            # Создаем тред в OpenAI
-            openai_thread = self.client.beta.threads.create()
+                    # If there are runs and the latest one is still active
+                    if runs.data and runs.data[0].status in ["in_progress", "queued", "requires_action"]:
+                        logger.warning(
+                            f"Thread {existing_thread.thread_id} has an active run {runs.data[0].id}. Creating a new thread.")
 
-            # Сохраняем тред в локальной базе данных
-            thread = Thread.objects.create(
-                thread_id=openai_thread.id,
-                order_key=str(appointment_id),
-                assistant=assistant,
-                appointment_id=appointment_id  # Сохраняем ID записи
-            )
-            logger.info(f"Создан новый тред {thread.thread_id} для записи {appointment_id}")
-            return thread
+                        # Instead of trying to cancel (which can fail), create a new thread
+                        return self._create_fresh_thread(appointment)
+
+                    # Thread is free, we can use it
+                    return existing_thread
+
+                except Exception as e:
+                    logger.warning(f"Error checking run status for thread {existing_thread.thread_id}: {e}")
+                    # If we can't check the run status, create a new thread to be safe
+                    return self._create_fresh_thread(appointment)
+
+            # No active thread found, create a new one
+            return self._create_fresh_thread(appointment)
 
         except Appointment.DoesNotExist:
-            logger.error(f"Запись с ID {appointment_id} не найдена")
-            raise ValueError(f"Запись с ID {appointment_id} не найдена")
+            logger.error(f"Appointment with ID {appointment_id} not found")
+            raise ValueError(f"Appointment with ID {appointment_id} not found")
         except Exception as e:
-            logger.error(f"Ошибка при создании/поиске треда: {str(e)}")
+            logger.error(f"Error in get_or_create_thread: {e}", exc_info=True)
+            raise
+
+    def _create_fresh_thread(self, appointment: Appointment) -> Thread:
+        """
+        Creates a completely new thread for an appointment.
+
+        Args:
+            appointment: Appointment object
+
+        Returns:
+            Thread: New thread object
+        """
+        try:
+            # Get first assistant from DB
+            assistant = Assistant.objects.first()
+            if not assistant:
+                logger.error("No assistants found in database")
+                raise ValueError("No assistants found in database")
+
+            # Create a new thread in OpenAI
+            openai_thread = self.client.beta.threads.create()
+
+            # Save thread in local database
+            thread = Thread.objects.create(
+                thread_id=openai_thread.id,
+                order_key=str(appointment.appointment_id),
+                assistant=assistant,
+                appointment_id=appointment.appointment_id
+            )
+
+            logger.info(f"Created new thread {thread.thread_id} for appointment {appointment.appointment_id}")
+            return thread
+
+        except Exception as e:
+            logger.error(f"Error creating new thread: {e}", exc_info=True)
             raise
 
     def add_message_to_thread(self, thread_id: str, content: str, role: str = "user") -> dict:
         """
-        Добавляет сообщение в тред.
+        Adds a message to a thread with enhanced error handling.
 
         Args:
-            thread_id: ID треда
-            content: Текст сообщения
-            role: Роль отправителя (обычно "user")
+            thread_id: Thread ID
+            content: Message content
+            role: Message role (usually "user")
 
         Returns:
-            dict: Информация о созданном сообщении
+            dict: Information about the created message
         """
         try:
             message = self.client.beta.threads.messages.create(
@@ -137,15 +180,52 @@ class AssistantClient:
                 role=role,
                 content=content
             )
-            logger.info(f"Добавлено сообщение от {role} в тред {thread_id}")
+            logger.info(f"Added message from {role} to thread {thread_id}")
             return message
         except Exception as e:
-            logger.error(f"Ошибка при добавлении сообщения в тред: {str(e)}")
+            error_message = str(e)
+
+            # Check if the error is about an active run
+            if "Can't add messages to thread" in error_message and "while a run" in error_message:
+                logger.warning(f"Thread {thread_id} has an active run, cannot add message. Creating a new thread.")
+
+                # Find the appointment ID from the Thread object
+                try:
+                    thread_obj = Thread.objects.get(thread_id=thread_id)
+                    appointment_id = thread_obj.appointment_id
+
+                    # Get the appointment
+                    appointment = Appointment.objects.get(appointment_id=appointment_id)
+
+                    # Create a completely new thread
+                    new_thread = self._create_fresh_thread(appointment)
+
+                    # Now add the message to the new thread
+                    message = self.client.beta.threads.messages.create(
+                        thread_id=new_thread.thread_id,
+                        role=role,
+                        content=content
+                    )
+
+                    logger.info(f"Added message to new thread {new_thread.thread_id}")
+
+                    # Update the original Thread object to use the new thread_id
+                    thread_obj.thread_id = new_thread.thread_id
+                    thread_obj.save()
+
+                    return message
+                except Exception as inner_e:
+                    logger.error(f"Error creating new thread when active run detected: {inner_e}")
+                    raise
+
+            # For other errors
+            logger.error(f"Error adding message to thread: {e}")
             raise
 
     def run_assistant(self, thread: Thread, appointment: Appointment, instructions: str = None) -> RunModel:
         """
-        Runs the assistant with proper instructions to ensure function calling
+        Runs the assistant with proper instructions to ensure function calling.
+        Enhanced with better error handling for active runs.
 
         Args:
             thread: Thread object
@@ -156,6 +236,28 @@ class AssistantClient:
             RunModel: Run model object
         """
         try:
+            # First check if this thread already has an active run
+            runs = self.client.beta.threads.runs.list(
+                thread_id=thread.thread_id,
+                limit=1
+            )
+
+            # If there's an active run, create a new thread
+            if runs.data and runs.data[0].status in ["in_progress", "queued", "requires_action"]:
+                logger.warning(f"Thread {thread.thread_id} already has an active run. Creating a new thread.")
+
+                # Create a new thread
+                new_thread = self._create_fresh_thread(appointment)
+
+                # Update the original Thread object
+                thread.thread_id = new_thread.thread_id
+                thread.save()
+
+                # Continue with the new thread ID
+                thread_id = new_thread.thread_id
+            else:
+                thread_id = thread.thread_id
+
             # Get patient and appointment data
             patient = appointment.patient
             patient_code = patient.patient_code
@@ -175,9 +277,35 @@ class AssistantClient:
             if appointment.clinic:
                 clinic_name = appointment.clinic.name
 
-            # Get current date and tomorrow's date
-            today = datetime.now().strftime("%Y-%m-%d")
-            tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            # Get current Moscow date and time (Moscow is UTC+3)
+            from datetime import timezone as tz
+            moscow_tz = tz(timedelta(hours=3))
+            current_moscow_datetime = datetime.now(moscow_tz)
+
+            # Format current Moscow date and time
+            current_moscow_date = current_moscow_datetime.strftime("%Y-%m-%d")
+            current_moscow_time = current_moscow_datetime.strftime("%H:%M")
+            current_moscow_full = current_moscow_datetime.strftime("%Y-%m-%d %H:%M")
+
+            # Get today's and tomorrow's dates in Moscow time
+            today = current_moscow_datetime.strftime("%Y-%m-%d")
+            tomorrow = (current_moscow_datetime + timedelta(days=1)).strftime("%Y-%m-%d")
+
+            # Calculate dates for "after tomorrow" and "a week later"
+            after_tomorrow = (current_moscow_datetime + timedelta(days=2)).strftime("%Y-%m-%d")
+            week_later = (current_moscow_datetime + timedelta(days=7)).strftime("%Y-%m-%d")
+
+            # Get day of week in Russian
+            weekdays_ru = {
+                0: "Понедельник",
+                1: "Вторник",
+                2: "Среда",
+                3: "Четверг",
+                4: "Пятница",
+                5: "Суббота",
+                6: "Воскресенье"
+            }
+            current_weekday = weekdays_ru[current_moscow_datetime.weekday()]
 
             # Use provided instructions or create default
             if not instructions:
@@ -226,29 +354,88 @@ class AssistantClient:
             - Клиника: {clinic_name}
             """
 
-            # Combine instructions
-            full_instructions = instructions + "\n\n" + patient_info
+            # Add current date and time context
+            datetime_context = f"""
+            # ТЕКУЩАЯ ДАТА И ВРЕМЯ (Москва):
+
+            - Текущая дата: {current_moscow_date} ({current_weekday})
+            - Текущее время: {current_moscow_time}
+            - Полная дата и время: {current_moscow_full}
+
+            # ИНТЕРПРЕТАЦИЯ ДАТ:
+            - Сегодня: {today}
+            - Завтра: {tomorrow}
+            - Послезавтра: {after_tomorrow}
+            - Через неделю: {week_later}
+
+            Если пользователь спрашивает о "послезавтра", это {after_tomorrow}.
+            Если пользователь спрашивает о "после после завтра", это {after_tomorrow}.
+            Если пользователь спрашивает о "через неделю", это {week_later}.
+
+            Используй эту информацию для определения даты в запросах.
+            """
+
+            # Combine all instructions
+            full_instructions = instructions + "\n\n" + patient_info + "\n\n" + datetime_context
 
             # Create assistant run with combined instructions
-            openai_run = self.client.beta.threads.runs.create(
-                thread_id=thread.thread_id,
-                assistant_id=thread.assistant.assistant_id,
-                instructions=full_instructions
-            )
+            try:
+                openai_run = self.client.beta.threads.runs.create(
+                    thread_id=thread_id,
+                    assistant_id=thread.assistant.assistant_id,
+                    instructions=full_instructions
+                )
 
-            # Save run in database
-            run = RunModel.objects.create(
-                run_id=openai_run.id,
-                status=openai_run.status
-            )
+                # Save run in database
+                run = RunModel.objects.create(
+                    run_id=openai_run.id,
+                    status=openai_run.status
+                )
 
-            # Update thread with current run
-            thread.current_run = run
-            thread.save()
+                # Update thread with current run
+                thread.current_run = run
+                thread.save()
 
-            logger.info(
-                f"Started run {run.run_id} for thread {thread.thread_id} with strict function calling instructions")
-            return run
+                logger.info(
+                    f"Started run {run.run_id} for thread {thread_id} with strict function calling instructions (Moscow time: {current_moscow_full})")
+                return run
+            except Exception as run_error:
+                # If we get an error about an active run, try creating a new thread again
+                error_message = str(run_error)
+                if "already has an active run" in error_message:
+                    logger.warning(
+                        f"Thread {thread_id} already has an active run despite our check. Creating a new thread and trying again.")
+
+                    # Create a new thread one more time
+                    new_thread = self._create_fresh_thread(appointment)
+
+                    # Update the original Thread object
+                    thread.thread_id = new_thread.thread_id
+                    thread.save()
+
+                    # Try creating the run with the new thread
+                    openai_run = self.client.beta.threads.runs.create(
+                        thread_id=new_thread.thread_id,
+                        assistant_id=thread.assistant.assistant_id,
+                        instructions=full_instructions
+                    )
+
+                    # Save run in database
+                    run = RunModel.objects.create(
+                        run_id=openai_run.id,
+                        status=openai_run.status
+                    )
+
+                    # Update thread with current run
+                    thread.current_run = run
+                    thread.save()
+
+                    logger.info(
+                        f"Started run {run.run_id} for new thread {new_thread.thread_id} after active run error (Moscow time: {current_moscow_full})")
+                    return run
+                else:
+                    # For other errors, just raise
+                    raise
 
         except Exception as e:
             logger.error(f"Error running assistant: {e}", exc_info=True)
@@ -258,6 +445,7 @@ class AssistantClient:
         """
         Обрабатывает функциональные вызовы от ассистента и форматирует ответы
         в соответствии с требованиями ACS.
+        Исправлено для возврата первого форматированного результата сразу.
 
         Args:
             run_id: ID запуска
@@ -302,6 +490,23 @@ class AssistantClient:
                         "output": json.dumps(formatted_result)
                     })
 
+                    # ВАЖНОЕ ИЗМЕНЕНИЕ: Возвращаем первый форматированный результат сразу
+                    # Это предотвратит продолжение выполнения и создания текстового ответа
+                    if formatted_result and "status" in formatted_result:
+                        logger.info(
+                            f"Немедленно возвращаем форматированный результат со статусом {formatted_result['status']}")
+
+                        # Мы все равно отправляем результаты вызовов функций, чтобы не оставлять выполнение в подвешенном состоянии
+                        self.client.beta.threads.runs.submit_tool_outputs(
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            tool_outputs=tool_outputs
+                        )
+
+                        # Но не ждем завершения текстового ответа, а сразу возвращаем результат функции
+                        return formatted_result
+
+                # Если мы дошли до этой точки, значит у нас есть несколько результатов функций
                 # Отправляем результаты вызовов функций
                 if tool_outputs:
                     self.client.beta.threads.runs.submit_tool_outputs(
@@ -310,19 +515,18 @@ class AssistantClient:
                         tool_outputs=tool_outputs
                     )
                     logger.info(f"Отправлено {len(tool_outputs)} результатов функций для запуска {run_id}")
-                    # Store the formatted results in run's metadata if available
-                    if hasattr(run, 'metadata'):
-                        run.metadata['formatted_results'] = formatted_results
-                    return formatted_results
+                    # Возвращаем первый результат, если он есть
+                    if formatted_results:
+                        return formatted_results[0]
                 else:
                     logger.warning("Нет результатов функций для отправки")
-                    return []
+                    return {"status": "error_med_element", "message": "Не получены результаты функций"}
 
             return run.status
 
         except Exception as e:
             logger.error(f"Ошибка при обработке вызовов функций: {str(e)}", exc_info=True)
-            raise
+            return {"status": "error_med_element", "message": f"Ошибка обработки: {str(e)}"}
 
     def _format_for_acs(self, function_name: str, function_args: dict, result: dict) -> dict:
         """
@@ -1262,7 +1466,7 @@ class AssistantClient:
     def wait_for_run_completion(self, thread_id: str, run_id: str, timeout: int = 60) -> dict:
         """
         Waits for completion of an assistant run, handling function calls.
-        Returns the formatted results of any function calls.
+        IMPORTANT: Now immediately returns formatted function results without waiting for text response.
 
         Args:
             thread_id: Thread ID
@@ -1294,6 +1498,17 @@ class AssistantClient:
                     logger.info(f"Run {run_id} requires action")
                     function_results = self.handle_function_calls(run_id, thread_id)
                     logger.info(f"Function call result: {function_results}")
+
+                    # IMPORTANT FIX: Immediately return function results without waiting for completion
+                    if function_results:
+                        logger.info(f"Immediately returning function results: {function_results}")
+                        # Cancel the run to avoid further processing
+                        try:
+                            self._cancel_run(thread_id, run_id)
+                        except Exception as e:
+                            logger.warning(f"Could not cancel run, but continuing: {e}")
+                        return function_results
+
                     continue
 
                 # Return if the run has completed
@@ -1409,19 +1624,39 @@ class AssistantClient:
     def _cancel_run(self, thread_id: str, run_id: str) -> None:
         """
         Helper method to cancel a run and update its status in the database.
+        Enhanced with better error handling for already canceled runs.
 
         Args:
             thread_id: Thread ID
             run_id: Run ID
         """
         try:
-            self.client.beta.threads.runs.cancel(
+            # First check the current run status to avoid trying to cancel an already canceled run
+            run = self.client.beta.threads.runs.retrieve(
                 thread_id=thread_id,
                 run_id=run_id
             )
+
+            # Only attempt to cancel if the run is not already in a terminal state
+            if run.status not in ["completed", "failed", "cancelled", "expired"]:
+                self.client.beta.threads.runs.cancel(
+                    thread_id=thread_id,
+                    run_id=run_id
+                )
+                logger.info(f"Successfully cancelled run {run_id}")
+            else:
+                logger.info(f"Run {run_id} already in terminal state: {run.status}, no need to cancel")
+
+            # Update status in database regardless
             self._update_run_status(run_id, "cancelled")
         except Exception as e:
-            logger.error(f"Error cancelling run: {str(e)}")
+            # Check for the specific error about already cancelled runs
+            error_message = str(e)
+            if "Cannot cancel run with status 'cancelled'" in error_message:
+                logger.info(f"Run {run_id} was already cancelled")
+                self._update_run_status(run_id, "cancelled")
+            else:
+                logger.error(f"Error cancelling run: {e}")
 
     def _extract_time_of_day(self, text: str) -> Optional[str]:
         """

@@ -2,7 +2,7 @@ import json
 import logging
 import re
 import calendar
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time
 from typing import Dict, Any, List, Optional, Tuple
 
 from django.http import JsonResponse
@@ -990,8 +990,6 @@ def process_appointment_time_response(response_data):
                 month_num = date_obj.month
                 weekday_idx = date_obj.weekday()
 
-                status = "success_for_check_info"
-
                 response = {
                     "status": status,
                     "date": f"{day} {MONTHS_RU[month_num]}",
@@ -1084,6 +1082,7 @@ def process_appointment_time_response(response_data):
 def process_voicebot_request(request):
     """
     Обработчик запросов от голосового бота, обеспечивающий правильное форматирование ответов.
+    Исправлено для обработки ошибок с активными run.
     """
     try:
         # Разбор данных запроса
@@ -1130,7 +1129,29 @@ def process_voicebot_request(request):
         assistant_client = AssistantClient()
 
         # Получение или создание треда для диалога
-        thread = assistant_client.get_or_create_thread(appointment_id)
+        thread = None
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                thread = assistant_client.get_or_create_thread(appointment_id)
+                break
+            except Exception as e:
+                if attempt < max_attempts - 1:
+                    logger.warning(f"Failed to get/create thread (attempt {attempt + 1}/{max_attempts}): {e}")
+                    time.sleep(1)  # Brief delay before retry
+                else:
+                    logger.error(f"Failed to get/create thread after {max_attempts} attempts: {e}")
+                    return JsonResponse({
+                        'status': 'error_med_element',
+                        'message': 'Failed to initialize conversation thread'
+                    })
+
+        if not thread:
+            logger.error("Failed to create thread")
+            return JsonResponse({
+                'status': 'error_med_element',
+                'message': 'Failed to initialize conversation thread'
+            })
 
         # Строгие инструкции для принудительного вызова функций
         strict_instructions = """
@@ -1147,301 +1168,35 @@ def process_voicebot_request(request):
         ТОЛЬКО ВЫЗОВ ФУНКЦИИ!
         """
 
-        # Добавление сообщения пользователя в тред
-        assistant_client.add_message_to_thread(thread.thread_id, user_input)
+        # Попытка добавить сообщение пользователя в тред
+        try:
+            assistant_client.add_message_to_thread(thread.thread_id, user_input)
+        except Exception as e:
+            logger.error(f"Failed to add message to thread: {e}")
+            # Создаём резервный ответ на основе запроса пользователя
+            return create_fallback_response(user_input, patient_code)
 
         # Запуск ассистента с строгими инструкциями
-        run = assistant_client.run_assistant(thread, appointment, instructions=strict_instructions)
+        try:
+            run = assistant_client.run_assistant(thread, appointment, instructions=strict_instructions)
+        except Exception as e:
+            logger.error(f"Failed to run assistant: {e}")
+            return create_fallback_response(user_input, patient_code)
 
         # Ожидание завершения и проверка на вызовы функций
-        result = assistant_client.wait_for_run_completion(thread.thread_id, run.run_id, timeout=40)
+        try:
+            result = assistant_client.wait_for_run_completion(thread.thread_id, run.run_id, timeout=40)
 
-        # Проверка наличия результатов вызова функций
-        if hasattr(result, 'required_action') and result.required_action:
-            # Извлечение результатов вызова функций
-            tool_outputs = result.required_action.submit_tool_outputs.tool_outputs
+            # Проверяем, есть ли у нас форматированный результат функции
+            if isinstance(result, dict) and "status" in result:
+                logger.info(f"Returning function result with status: {result['status']}")
+                return JsonResponse(result)
+        except Exception as e:
+            logger.error(f"Error waiting for run completion: {e}")
+            # В случае ошибки, продолжаем выполнение и попробуем другие методы
 
-            formatted_results = []  # Сохраним все результаты вызовов функций
-
-            for tool_output in tool_outputs:
-                try:
-                    # Извлечение результата из вывода инструмента
-                    function_name = tool_output.function.name
-                    output_json = json.loads(tool_output.output)
-                    logger.info(f"Function call result: {output_json}")
-
-                    # Сохраняем результат
-                    formatted_results.append(output_json)
-
-                    # Обработка вывода для обеспечения правильного форматирования
-                    if function_name == "which_time_in_certain_day":
-                        formatted_result = process_which_time_response(output_json,
-                                                                       output_json.get("date_time",
-                                                                                       datetime.now().strftime(
-                                                                                           "%Y-%m-%d")))
-                    elif function_name == "appointment_time_for_patient":
-                        formatted_result = process_appointment_time_response(output_json)
-                    elif function_name == "reserve_reception_for_patient":
-                        date_str = output_json.get("date_from_patient", "")
-                        date_obj = None
-                        time_str = "10:00"
-
-                        if date_str:
-                            try:
-                                date_parts = date_str.split()
-                                date_obj = datetime.strptime(date_parts[0], "%Y-%m-%d")
-                                if len(date_parts) > 1:
-                                    time_str = date_parts[1]
-                            except ValueError:
-                                date_obj = datetime.now()
-                        else:
-                            date_obj = datetime.now()
-
-                        formatted_result = process_reserve_reception_response(output_json, date_obj, time_str)
-                    elif function_name == "delete_reception_for_patient":
-                        formatted_result = process_delete_reception_response(output_json)
-                    else:
-                        formatted_result = output_json
-
-                    # Проверка и возврат правильно отформатированного ответа
-                    if isinstance(formatted_result, dict) and "status" in formatted_result:
-                        status_prefixes = [
-                            "success_change_reception", "error_change_reception",
-                            "which_time", "error_empty_windows", "only_first_time",
-                            "only_two_time", "change_only_first_time", "change_only_two_time",
-                            "nonworktime", "success_deleting_reception", "error_deleting_reception",
-                            "error_reception_unavailable", "bad_user_input", "error_med_element",
-                            "success_for_check_info"
-                        ]
-
-                        if any(formatted_result["status"].startswith(prefix) for prefix in status_prefixes):
-                            logger.info(f"Returning formatted function result with status {formatted_result['status']}")
-                            return JsonResponse(formatted_result)
-
-                except Exception as e:
-                    logger.error(f"Error processing tool output: {e}")
-
-            # Если есть результаты функций, но мы не вернули ответ выше,
-            # возвращаем первый результат (если он есть)
-            if formatted_results:
-                first_result = formatted_results[0]
-                if isinstance(first_result, dict):
-                    # Если в результате нет поля status, добавляем его
-                    if "status" not in first_result:
-                        # Определяем подходящий статус на основе содержимого
-                        if "first_time" in first_result:
-                            first_result["status"] = "which_time"
-                        elif "time" in first_result:
-                            first_result["status"] = "success_change_reception"
-                        else:
-                            first_result["status"] = "success_for_check_info"
-
-                    logger.info(
-                        f"Returning the first function result with status {first_result.get('status', 'unknown')}")
-                    return JsonResponse(first_result)
-
-            # Если мы дошли до этой точки, значит нужно отправить результаты функций
-            # и запросить завершение запуска
-            tool_output_list = []
-            for tool_output in tool_outputs:
-                tool_output_list.append({
-                    "tool_call_id": tool_output.id,
-                    "output": tool_output.output
-                })
-
-            # Отправляем результаты вызовов функций и ждем финальный ответ
-            assistant_client.client.beta.threads.runs.submit_tool_outputs(
-                thread_id=thread.thread_id,
-                run_id=run.run_id,
-                tool_outputs=tool_output_list
-            )
-
-            # Ждем завершения выполнения
-            final_result = assistant_client.wait_for_run_completion(thread.thread_id, run.run_id, timeout=30)
-
-            # Получаем последнее сообщение ассистента после обработки функций
-            latest_messages = assistant_client.get_messages(thread.thread_id, limit=1)
-            if latest_messages and len(latest_messages) > 0:
-                # Теперь нам нужно извлечь результат выполнения функции из метаданных запуска
-                try:
-                    # Ищем JSON в сообщении ассистента
-                    assistant_message = latest_messages[0].content[0].text.value
-                    logger.info(f"Final assistant message: {assistant_message}")
-
-                    # Пытаемся найти JSON в сообщении
-                    json_pattern = r'\{(?:[^{}]|"[^"]*"|\{(?:[^{}]|"[^"]*")*\})*\}'
-                    json_matches = re.findall(json_pattern, assistant_message, re.DOTALL)
-
-                    for json_match in json_matches:
-                        try:
-                            formatted_result = json.loads(json_match)
-                            if isinstance(formatted_result, dict) and "status" in formatted_result:
-                                status_prefixes = [
-                                    "success_change_reception", "error_change_reception",
-                                    "which_time", "error_empty_windows", "only_first_time",
-                                    "only_two_time", "change_only_first_time", "change_only_two_time",
-                                    "nonworktime", "success_deleting_reception", "error_deleting_reception"
-                                ]
-
-                                if any(formatted_result["status"].startswith(prefix) for prefix in status_prefixes):
-                                    logger.info(
-                                        f"Returning extracted JSON from final message with status {formatted_result['status']}")
-                                    return JsonResponse(formatted_result)
-                        except json.JSONDecodeError:
-                            continue
-                except Exception as e:
-                    logger.error(f"Error handling final assistant message: {e}")
-
-                # Если дошли до сюда, то пробуем вернуть первый результат функции снова
-                if formatted_results:
-                    logger.info(f"Returning first function result as backup")
-                    return JsonResponse(formatted_results[0])
-
-        # Если у нас нет результатов функций, пытаемся извлечь вызовы функций из сообщения ассистента
-        messages = assistant_client.get_messages(thread.thread_id, limit=1)
-
-        if messages and len(messages) > 0 and messages[0].role == "assistant":
-            # Получаем сообщение ассистента
-            assistant_message = messages[0].content[0].text.value
-            logger.info(f"Assistant message: {assistant_message}")
-
-            # Пытаемся извлечь JSON-ответ из сообщения
-            try:
-                json_pattern = r'\{(?:[^{}]|"[^"]*"|\{(?:[^{}]|"[^"]*")*\})*\}'
-                json_matches = re.findall(json_pattern, assistant_message, re.DOTALL)
-
-                for json_match in json_matches:
-                    try:
-                        formatted_result = json.loads(json_match)
-                        if isinstance(formatted_result, dict) and "status" in formatted_result:
-                            status_prefixes = [
-                                "success_change_reception", "error_change_reception",
-                                "which_time", "error_empty_windows", "only_first_time",
-                                "only_two_time", "change_only_first_time", "change_only_two_time",
-                                "nonworktime", "success_deleting_reception", "error_deleting_reception"
-                            ]
-
-                            if any(formatted_result["status"].startswith(prefix) for prefix in status_prefixes):
-                                logger.info(f"Returning extracted JSON with status {formatted_result['status']}")
-                                return JsonResponse(formatted_result)
-                    except json.JSONDecodeError:
-                        continue
-            except Exception as e:
-                logger.error(f"Error extracting JSON from response: {e}")
-
-        # Если у нас нет результатов функций, но есть сообщение от ассистента,
-        # пытаемся извлечь намерение из его текстового ответа
-        messages = assistant_client.get_messages(thread.thread_id, limit=1)
-
-        if messages and len(messages) > 0 and messages[0].role == "assistant":
-            # Получаем сообщение ассистента
-            assistant_message = messages[0].content[0].text.value
-            logger.info(f"Assistant message: {assistant_message}")
-
-            # Пытаемся извлечь намерение из текстового ответа
-            extracted_response = extract_intent_from_assistant_message(
-                assistant_message, appointment_id, patient_code
-            )
-
-            if extracted_response and isinstance(extracted_response, dict) and "status" in extracted_response:
-                logger.info(f"Extracted intent from assistant message: {extracted_response['status']}")
-                return JsonResponse(extracted_response)
-
-            # Если в сообщении ассистента есть перечисление времён, это ответ на запрос о свободных окошках
-            if re.search(r'- \d+:\d+', assistant_message):
-                # Попробуем определить дату из сообщения
-                date_match = re.search(r'на (\d+) ([а-яА-Я]+)', assistant_message)
-
-                if date_match:
-                    day = int(date_match.group(1))
-                    month_name = date_match.group(2)
-
-                    # Определяем месяц
-                    month_num = datetime.now().month  # По умолчанию текущий месяц
-                    for num, name in MONTHS_RU.items():
-                        if name.lower().startswith(month_name.lower()) or month_name.lower().startswith(name.lower()):
-                            month_num = num
-                            break
-
-                    # Создаем дату
-                    try:
-                        date_obj = datetime(datetime.now().year, month_num, day)
-                    except ValueError:
-                        # Если неверная дата, используем завтрашний день
-                        date_obj = datetime.now() + timedelta(days=1)
-
-                    # Определяем день недели
-                    weekday_idx = date_obj.weekday()
-
-                    # Извлекаем времена
-                    times = re.findall(r'- (\d+:\d+)', assistant_message)
-
-                    relation = None
-                    today = datetime.now().date()
-                    tomorrow = today + timedelta(days=1)
-
-                    if date_obj.date() == today:
-                        relation = "today"
-                    elif date_obj.date() == tomorrow:
-                        relation = "tomorrow"
-
-                    # Форматируем ответ в соответствии с API
-                    response = format_available_times_response(times, date_obj, "Специалист", relation)
-                    return JsonResponse(response)
-
-            # Пытаемся еще раз поискать JSON в сообщении ассистента
-            try:
-                json_pattern = r'\{(?:[^{}]|"[^"]*"|\{(?:[^{}]|"[^"]*")*\})*\}'
-                json_matches = re.findall(json_pattern, assistant_message, re.DOTALL)
-
-                for json_match in json_matches:
-                    try:
-                        formatted_result = json.loads(json_match)
-                        if isinstance(formatted_result, dict) and "status" in formatted_result:
-                            return JsonResponse(formatted_result)
-                    except json.JSONDecodeError:
-                        continue
-            except Exception as e:
-                logger.error(f"Error extracting JSON from response (second attempt): {e}")
-
-        # Если всё иное не удалось, пробуем вызвать функцию напрямую на основе текста запроса
-        if "свобод" in user_input.lower() or "окошк" in user_input.lower() or "доступн" in user_input.lower():
-            # Определяем дату из запроса
-            if "послезавтра" in user_input.lower() or "после завтра" in user_input.lower():
-                date_obj = datetime.now() + timedelta(days=2)
-            elif "завтра" in user_input.lower():
-                date_obj = datetime.now() + timedelta(days=1)
-            elif "сегодня" in user_input.lower():
-                date_obj = datetime.now()
-            else:
-                # По умолчанию завтра
-                date_obj = datetime.now() + timedelta(days=1)
-
-            date_str = date_obj.strftime("%Y-%m-%d")
-
-            # Вызываем функцию напрямую
-            try:
-                from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
-                result = which_time_in_certain_day(patient_code, date_str)
-
-                if hasattr(result, 'content'):
-                    result_dict = json.loads(result.content.decode('utf-8'))
-                    processed_result = process_which_time_response(result_dict, date_obj)
-                    return JsonResponse(processed_result)
-                else:
-                    processed_result = process_which_time_response(result, date_obj)
-                    return JsonResponse(processed_result)
-            except Exception as e:
-                logger.error(f"Error calling which_time_in_certain_day directly: {e}", exc_info=True)
-
-        # Если все методы не сработали, вернем базовый резервный ответ
-        fallback_response = {
-            "status": "error_med_element",
-            "message": "Не удалось определить тип запроса"
-        }
-
-        logger.info(f"Returning fallback response with status {fallback_response['status']}")
-        return JsonResponse(fallback_response)
+        # Попытка прямого вызова функции на основе текста запроса (как резервный вариант)
+        return create_fallback_response(user_input, patient_code)
 
     except json.JSONDecodeError:
         logger.error("Invalid JSON format in request")
@@ -1454,6 +1209,85 @@ def process_voicebot_request(request):
         return JsonResponse({
             'status': 'error_med_element',
             'message': f'Error processing request: {str(e)}'
+        })
+
+
+def create_fallback_response(user_input, patient_code):
+    """
+    Creates a fallback response when the main processing flow fails.
+    Makes direct function calls based on user input to ensure a meaningful response.
+
+    Args:
+        user_input: The user's input text
+        patient_code: The patient's ID code
+
+    Returns:
+        JsonResponse: A properly formatted response
+    """
+    try:
+        # Check for available times request
+        if "свобод" in user_input.lower() or "окошк" in user_input.lower() or "доступн" in user_input.lower():
+            # Determine date from request
+            if "послезавтра" in user_input.lower() or "после завтра" in user_input.lower():
+                date_obj = datetime.now() + timedelta(days=2)
+            elif "завтра" in user_input.lower():
+                date_obj = datetime.now() + timedelta(days=1)
+            elif "сегодня" in user_input.lower():
+                date_obj = datetime.now()
+            else:
+                # Default to tomorrow
+                date_obj = datetime.now() + timedelta(days=1)
+
+            date_str = date_obj.strftime("%Y-%m-%d")
+
+            # Call function directly
+            from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
+            result = which_time_in_certain_day(patient_code, date_str)
+
+            if hasattr(result, 'content'):
+                result_dict = json.loads(result.content.decode('utf-8'))
+                processed_result = process_which_time_response(result_dict, date_obj)
+                return JsonResponse(processed_result)
+            else:
+                processed_result = process_which_time_response(result, date_obj)
+                return JsonResponse(processed_result)
+
+        # Check for appointment info request
+        elif "когда" in user_input.lower() or "време" in user_input.lower() or "запис" in user_input.lower():
+            from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
+            result = appointment_time_for_patient(patient_code)
+
+            if hasattr(result, 'content'):
+                result_dict = json.loads(result.content.decode('utf-8'))
+                processed_result = process_appointment_time_response(result_dict)
+                return JsonResponse(processed_result)
+            else:
+                processed_result = process_appointment_time_response(result)
+                return JsonResponse(processed_result)
+
+        # Check for cancel request
+        elif "отмен" in user_input.lower() or "удал" in user_input.lower():
+            from reminder.infoclinica_requests.schedule.delete_reception_for_patient import delete_reception_for_patient
+            result = delete_reception_for_patient(patient_code)
+
+            if hasattr(result, 'content'):
+                result_dict = json.loads(result.content.decode('utf-8'))
+                processed_result = process_delete_reception_response(result_dict)
+                return JsonResponse(processed_result)
+            else:
+                processed_result = process_delete_reception_response(result)
+                return JsonResponse(processed_result)
+
+        # Default fallback response
+        return JsonResponse({
+            "status": "error_med_element",
+            "message": "Не удалось определить тип запроса"
+        })
+    except Exception as e:
+        logger.error(f"Error in fallback response generation: {e}", exc_info=True)
+        return JsonResponse({
+            "status": "error_med_element",
+            "message": "Произошла ошибка при обработке запроса"
         })
 
 

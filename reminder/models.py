@@ -492,8 +492,8 @@ class BatchTimeout(models.Model):
 
 
 class Thread(models.Model):
-    thread_id = models.CharField(max_length=120, unique=True, default=generate_uuid, editable=False)
-    order_key = models.CharField(max_length=120, unique=True, default=generate_uuid, editable=False)
+    thread_id = models.CharField(max_length=120, unique=False, default=generate_uuid, editable=False)
+    order_key = models.CharField(max_length=120, unique=False, default=generate_uuid, editable=False)
     assistant = models.ForeignKey(
         'Assistant',
         on_delete=models.SET_NULL,
