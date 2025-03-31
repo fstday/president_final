@@ -5,11 +5,18 @@ import logging
 import time as time_module
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Union
+
+from django.http.response import JsonResponse
 from django.utils import timezone
 from django.conf import settings
 from openai import OpenAI
 from django.db import transaction
-from reminder.models import Assistant, Thread, Run as RunModel, Patient, Appointment, QueueInfo
+
+from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
+from reminder.infoclinica_requests.schedule.delete_reception_for_patient import delete_reception_for_patient
+from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import reserve_reception_for_patient
+from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
+from reminder.models import Assistant, Thread, Run as RunModel, Patient, Appointment, QueueInfo, AvailableTimeSlot
 from reminder.openai_assistant.assistant_instructions import get_enhanced_assistant_prompt
 
 logger = logging.getLogger(__name__)
@@ -260,14 +267,14 @@ class AssistantClient:
             logger.error(f"Error adding message to thread: {e}")
             raise
 
-    def run_assistant(self, thread: Thread, appointment: Appointment, instructions: str = None) -> RunModel:
+    def run_assistant(self, thread: Thread, entity, instructions: str = None) -> RunModel:
         """
         Runs the assistant with proper instructions to ensure function calling.
         Enhanced with better error handling for active runs and available time slots.
 
         Args:
             thread: Thread object
-            appointment: Appointment object
+            entity: Appointment object or Patient object
             instructions: Additional instructions to enforce function calling
 
         Returns:
@@ -285,7 +292,7 @@ class AssistantClient:
                 logger.warning(f"Thread {thread.thread_id} already has an active run. Creating a new thread.")
 
                 # Create a new thread
-                new_thread = self._create_fresh_thread(appointment)
+                new_thread = self._create_fresh_thread(entity)
 
                 # Update the original Thread object
                 thread.thread_id = new_thread.thread_id
@@ -296,23 +303,32 @@ class AssistantClient:
             else:
                 thread_id = thread.thread_id
 
-            # Get patient and appointment data
-            patient = appointment.patient
+            # Determine if we're working with an appointment or directly with a patient
+            is_appointment = isinstance(entity, Appointment)
+
+            if is_appointment:
+                appointment = entity
+                patient = appointment.patient
+            else:
+                patient = entity
+                appointment = Appointment.objects.filter(patient=patient, is_active=True).order_by(
+                    '-start_time').first()
+
             patient_code = patient.patient_code
 
             # Format appointment time
             appointment_time = "Не указано"
-            if appointment.start_time:
+            if appointment and appointment.start_time:
                 appointment_time = appointment.start_time.strftime("%Y-%m-%d %H:%M")
 
             # Get doctor name
             doctor_name = "Не указан"
-            if appointment.doctor:
+            if appointment and appointment.doctor:
                 doctor_name = appointment.doctor.full_name
 
             # Get clinic name
             clinic_name = "Не указана"
-            if appointment.clinic:
+            if appointment and appointment.clinic:
                 clinic_name = appointment.clinic.name
 
             # Get current Moscow date and time (Moscow is UTC+3)
@@ -386,7 +402,7 @@ class AssistantClient:
             # ВАЖНАЯ ИНФОРМАЦИЯ О ПАЦИЕНТЕ И ПРИЕМЕ:
 
             - Текущий пациент: {patient.full_name} (ID: {patient_code})
-            - Запись: ID {appointment.appointment_id}, назначена на {appointment_time}
+            - Запись: {f"ID {appointment.appointment_id}, назначена на {appointment_time}" if appointment else "Нет активной записи"}
             - Врач: {doctor_name}
             - Клиника: {clinic_name}
 
@@ -415,11 +431,8 @@ class AssistantClient:
             Используй эту информацию для определения даты в запросах.
             """
 
-            # NEW CODE: Добавляем информацию о доступных временных слотах
-            # Импортируем функцию форматирования слотов
+            # Get available slots information
             from reminder.openai_assistant.api_views import format_available_slots_for_prompt
-
-            # Получаем и форматируем доступные слоты
             available_slots_info = format_available_slots_for_prompt(patient, today, tomorrow)
 
             # Combine all instructions
@@ -454,7 +467,7 @@ class AssistantClient:
                         f"Thread {thread_id} already has an active run despite our check. Creating a new thread and trying again.")
 
                     # Create a new thread one more time
-                    new_thread = self._create_fresh_thread(appointment)
+                    new_thread = self._create_fresh_thread(entity)
 
                     # Update the original Thread object
                     thread.thread_id = new_thread.thread_id
@@ -1341,3 +1354,181 @@ class AssistantClient:
                 logger.info(f"Updated run {run_id} status to: {status}")
         except Exception as e:
             logger.error(f"Error updating run status: {e}")
+
+    def create_fallback_response(user_input, patient_code, appointment=None):
+        """
+        Creates a fallback response when the main processing flow fails.
+        Makes direct function calls based on user input to ensure a meaningful response.
+
+        Args:
+            user_input: The user's input text
+            patient_code: The patient's ID code
+            appointment: Optional appointment object
+
+        Returns:
+            JsonResponse: A properly formatted response
+        """
+        from reminder.openai_assistant.api_views import process_which_time_response, process_reserve_reception_response, \
+            process_delete_reception_response, process_appointment_time_response
+
+        try:
+            user_input = user_input.lower()
+
+            # Check for appointment info request (highest priority for clarity)
+            if any(word in user_input for word in ["когда", "какая", "время", "записан", "во сколько", "не помню"]):
+                result = appointment_time_for_patient(patient_code)
+
+                if hasattr(result, 'content'):
+                    result_dict = json.loads(result.content.decode('utf-8'))
+                    processed_result = process_appointment_time_response(result_dict)
+                    return JsonResponse(processed_result)
+                else:
+                    processed_result = process_appointment_time_response(result)
+                    return JsonResponse(processed_result)
+
+            # Check for cancel request
+            elif any(word in user_input for word in ["отмен", "удал", "не приду", "убер"]):
+                if not any(word in user_input for word in ["перенес", "перезапиш", "измен"]):
+                    result = delete_reception_for_patient(patient_code)
+
+                    if hasattr(result, 'content'):
+                        result_dict = json.loads(result.content.decode('utf-8'))
+                        processed_result = process_delete_reception_response(result_dict)
+                        return JsonResponse(processed_result)
+                    else:
+                        processed_result = process_delete_reception_response(result)
+                        return JsonResponse(processed_result)
+
+            # Check for booking/rescheduling request
+            elif any(word in user_input for word in ["запиш", "записаться", "перенес", "перезапиш", "измен"]):
+                # First check if patient exists
+                try:
+                    patient = Patient.objects.get(patient_code=patient_code)
+                except Patient.DoesNotExist:
+                    return JsonResponse({
+                        "status": "error_med_element",
+                        "message": f"Пациент с кодом {patient_code} не найден"
+                    })
+
+                # Determine date from request
+                date_obj = datetime.now()
+                if "завтра" in user_input:
+                    date_obj = datetime.now() + timedelta(days=1)
+                elif "послезавтра" in user_input or "после завтра" in user_input:
+                    date_obj = datetime.now() + timedelta(days=2)
+
+                # Check if time is explicitly specified
+                time_str = None
+                time_pattern = r'(\d{1,2})[:\s](\d{2})'
+                time_match = re.search(time_pattern, user_input)
+                if time_match:
+                    hour = int(time_match.group(1))
+                    minute = int(time_match.group(2))
+                    time_str = f"{hour:02d}:{minute:02d}"
+                else:
+                    # Use predefined times based on time of day mentions
+                    if "утр" in user_input:
+                        time_str = "10:30"
+                    elif "обед" in user_input or "днем" in user_input or "в обед" in user_input:
+                        time_str = "13:30"
+                    elif "вечер" in user_input or "ужин" in user_input:
+                        time_str = "18:30"
+                    else:
+                        # If no time specified, check available slots from the database
+                        date_only = date_obj.date()
+                        available_slots = AvailableTimeSlot.objects.filter(
+                            patient=patient,
+                            date=date_only
+                        ).order_by('time')
+
+                        if available_slots.exists():
+                            # Use the first available slot
+                            slot = available_slots.first()
+                            time_str = slot.time.strftime("%H:%M")
+                        else:
+                            # If no slots available in DB, try to get them first
+                            try:
+                                # Get available times for the day
+                                date_str = date_obj.strftime("%Y-%m-%d")
+                                available_times = which_time_in_certain_day(patient_code, date_str)
+
+                                # Process the result to extract times
+                                if hasattr(available_times, 'content'):
+                                    available_times_dict = json.loads(available_times.content.decode('utf-8'))
+                                else:
+                                    available_times_dict = available_times
+
+                                # Extract first time if available
+                                if ("first_time" in available_times_dict and available_times_dict["first_time"] or
+                                        "time_1" in available_times_dict and available_times_dict["time_1"]):
+                                    time_str = available_times_dict.get("first_time") or available_times_dict.get("time_1")
+                                # If no times available, notify user
+                                else:
+                                    return JsonResponse({
+                                        "status": "error_empty_windows",
+                                        "message": f"На {date_obj.strftime('%d.%m.%Y')} нет доступных окон для записи."
+                                    })
+                            except Exception as e:
+                                logger.error(f"Error getting available times: {e}")
+                                # Default time if all else fails
+                                time_str = "10:30"
+
+                # Format date and time for booking
+                date_str = date_obj.strftime("%Y-%m-%d")
+                datetime_str = f"{date_str} {time_str}"
+
+                # Call function
+                result = reserve_reception_for_patient(patient_code, datetime_str, 1)
+
+                if hasattr(result, 'content'):
+                    result_dict = json.loads(result.content.decode('utf-8'))
+                    processed_result = process_reserve_reception_response(result_dict, date_obj, time_str)
+                    return JsonResponse(processed_result)
+                else:
+                    processed_result = process_reserve_reception_response(result, date_obj, time_str)
+                    return JsonResponse(processed_result)
+
+            # Check for available time request
+            elif any(word in user_input for word in ["свобод", "доступн", "окошк", "када", "когда можно"]):
+                # Determine date from request
+                if "завтра" in user_input:
+                    date_obj = datetime.now() + timedelta(days=1)
+                elif "послезавтра" in user_input or "после завтра" in user_input:
+                    date_obj = datetime.now() + timedelta(days=2)
+                else:
+                    date_obj = datetime.now()  # Default to today
+
+                date_str = date_obj.strftime("%Y-%m-%d")
+
+                # Call function
+                result = which_time_in_certain_day(patient_code, date_str)
+
+                if hasattr(result, 'content'):
+                    result_dict = json.loads(result.content.decode('utf-8'))
+                    processed_result = process_which_time_response(result_dict, date_obj)
+                    return JsonResponse(processed_result)
+                else:
+                    processed_result = process_which_time_response(result, date_obj)
+                    return JsonResponse(processed_result)
+
+            # Default to checking available times for today
+            else:
+                date_obj = datetime.now()
+                date_str = date_obj.strftime("%Y-%m-%d")
+
+                result = which_time_in_certain_day(patient_code, date_str)
+
+                if hasattr(result, 'content'):
+                    result_dict = json.loads(result.content.decode('utf-8'))
+                    processed_result = process_which_time_response(result_dict, date_obj)
+                    return JsonResponse(processed_result)
+                else:
+                    processed_result = process_which_time_response(result, date_obj)
+                    return JsonResponse(processed_result)
+
+        except Exception as e:
+            logger.error(f"Error in fallback response generation: {e}", exc_info=True)
+            return JsonResponse({
+                "status": "error_med_element",
+                "message": "Произошла ошибка при обработке запроса"
+            })
