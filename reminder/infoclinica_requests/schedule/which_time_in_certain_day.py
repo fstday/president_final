@@ -8,12 +8,16 @@ from django.http import JsonResponse
 from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import reserve_reception_for_patient
 from reminder.models import *
 from reminder.infoclinica_requests.utils import format_doctor_name, format_russian_date
+from reminder.models import AvailableTimeSlot
+from django.utils.timezone import make_aware
+from datetime import datetime, time as dt_time
 
 
 def which_time_in_certain_day(patient_code, date_time):
     """
     Обработка запроса для получения доступных интервалов на определенный день.
     Возвращает все доступные слоты вместо только первых трех.
+    Сохраняет доступные времена в БД для дальнейшего использования.
     """
     global doctor_name
     logger.info(
@@ -95,6 +99,29 @@ def which_time_in_certain_day(patient_code, date_time):
         time_value = extract_time(interval)
         if time_value:
             all_available_times.append(time_value)
+
+    # Сохраняем доступные времена в БД для этого пациента
+    # Сначала удаляем все существующие записи для этой даты
+    AvailableTimeSlot.objects.filter(
+        patient=patient,
+        date=requested_date_only
+    ).delete()
+
+    # Затем сохраняем новые
+    doctor_obj = appointment.doctor if appointment and appointment.doctor else None
+    clinic_obj = appointment.clinic if appointment and appointment.clinic else None
+
+    for time_str in all_available_times:
+        hour, minute = map(int, time_str.split(':'))
+        time_obj = dt_time(hour, minute)
+
+        AvailableTimeSlot.objects.create(
+            patient=patient,
+            date=requested_date_only,
+            time=time_obj,
+            doctor=doctor_obj,
+            clinic=clinic_obj
+        )
 
     # Получаем также первые три времени для обратной совместимости
     first_time = extract_time(result_intervals[0]) if len(result_intervals) > 0 else None

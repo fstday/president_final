@@ -130,47 +130,73 @@ LOGGING = {
     'disable_existing_loggers': False,
     'formatters': {
         'verbose': {
-            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'format': '{levelname} {asctime} {module} {process:d} {message}',
             'style': '{',
         },
         'simple': {
             'format': '{levelname} {message}',
             'style': '{',
         },
+        'api_concise': {
+            'format': '{asctime} {levelname} {message}',
+            'style': '{',
+        }
+    },
+    'filters': {
+        'require_debug_true': {
+            '()': 'django.utils.log.RequireDebugTrue',
+        },
     },
     'handlers': {
         'console': {
-            'level': 'DEBUG',
+            'level': 'INFO',  # Change from DEBUG to INFO
             'class': 'logging.StreamHandler',
-            'formatter': 'verbose',
+            'formatter': 'simple',
         },
         'file': {
             'level': 'INFO',
             'class': 'logging.FileHandler',
-            'filename': BASE_DIR / 'logs' / 'debug.log',
+            'filename': BASE_DIR / 'logs' / 'application.log',
             'formatter': 'verbose',
         },
-        'infoclinica_file': {
-            'level': 'INFO',
+        'api_file': {
+            'level': 'INFO',  # Keep API calls at INFO or higher
             'class': 'logging.FileHandler',
-            'filename': BASE_DIR / 'logs' / 'infoclinica.log',
+            'filename': BASE_DIR / 'logs' / 'api_calls.log',
+            'formatter': 'api_concise',
+        },
+        'debug_file': {
+            'level': 'DEBUG',
+            'class': 'logging.FileHandler',
+            'filename': BASE_DIR / 'logs' / 'debug.log',
             'formatter': 'verbose',
+            'filters': ['require_debug_true'],
         },
     },
     'loggers': {
-        '': {
+        '': {  # Root logger
             'handlers': ['console', 'file'],
-            'level': 'DEBUG',
+            'level': 'INFO',
             'propagate': True,
         },
-        'celery': {
-            'handlers': ['console', 'file'],
+        'openai': {  # OpenAI specific logger
+            'handlers': ['api_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        '_base_client': {  # OpenAI client library
+            'handlers': ['api_file'],
+            'level': 'WARNING',  # Only log warnings and errors
+            'propagate': False,
+        },
+        '_trace': {  # HTTP request tracing
+            'handlers': ['debug_file'],
             'level': 'DEBUG',
-            'propagate': True,
+            'propagate': False,
         },
         'reminder.infoclinica': {
-            'handlers': ['console', 'infoclinica_file'],
-            'level': 'DEBUG',
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
             'propagate': False,
         },
     },

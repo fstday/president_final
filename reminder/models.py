@@ -556,3 +556,36 @@ class Assistant(models.Model):
 
     def __str__(self):
         return f'Assistant {self.assistant_id}\nName: {self.name}\nModel: {self.model}\nInstructions: {self.instructions}\nCreated at: {self.created_at}'
+
+
+class AvailableTimeSlot(models.Model):
+    """Доступные временные слоты для записи на прием"""
+    patient = models.ForeignKey(
+        Patient, on_delete=models.CASCADE,
+        related_name="available_slots",
+        verbose_name="Пациент"
+    )
+    date = models.DateField(verbose_name="Дата слота")
+    time = models.TimeField(verbose_name="Время слота")
+    doctor = models.ForeignKey(
+        Doctor, on_delete=models.SET_NULL,
+        related_name="available_slots",
+        verbose_name="Врач",
+        null=True, blank=True
+    )
+    clinic = models.ForeignKey(
+        Clinic, on_delete=models.SET_NULL,
+        related_name="available_slots",
+        verbose_name="Клиника",
+        null=True, blank=True
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Доступный временной слот"
+        verbose_name_plural = "Доступные временные слоты"
+        ordering = ["date", "time"]
+        unique_together = ['patient', 'date', 'time']
+
+    def __str__(self):
+        return f"Слот {self.date} {self.time} для {self.patient.full_name}"

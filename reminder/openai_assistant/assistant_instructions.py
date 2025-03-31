@@ -332,7 +332,7 @@ def get_enhanced_assistant_prompt():
     Returns an enhanced prompt with examples to train the assistant
     to properly follow the scheduling algorithm
     """
-    return """
+    base_instructions = """
     # МЕДИЦИНСКИЙ АССИСТЕНТ ДЛЯ УПРАВЛЕНИЯ ЗАПИСЯМИ НА ПРИЕМ
 
     ## ОСНОВНАЯ ЗАДАЧА
@@ -495,6 +495,10 @@ def get_enhanced_assistant_prompt():
     4. Отмена записи → delete_reception_for_patient
     """
 
+    booking_instructions = get_booking_instructions()
+
+    return base_instructions + "\n\n" + booking_instructions + "\n\n" + DEFAULT_INSTRUCTIONS
+
 
 def get_assistant_instructions(appointment=None, patient=None):
     """
@@ -545,3 +549,46 @@ EXAMPLES_FOR_TOOLS = """
 
 Важно: Всегда вызывайте соответствующую функцию вместо ответа текстом, когда пользователь запрашивает информацию о записях, времени или хочет выполнить действие с записью.
 """
+
+
+def get_booking_instructions():
+    """
+    Returns specific instructions for handling booking requests without specified time
+    """
+    return """
+    # АЛГОРИТМ АВТОМАТИЧЕСКОГО ВЫБОРА ВРЕМЕНИ
+
+    Когда пациент просит записать его на прием, но НЕ указывает конкретное время:
+
+    1. ИСПОЛЬЗУЙ ДОСТУПНЫЕ ВРЕМЕННЫЕ СЛОТЫ, предоставленные в инструкциях
+
+    2. ДЛЯ СЕГОДНЯ:
+       - Если есть слоты на сегодня, выбери самый ранний и используй его для записи
+       - Если слотов на сегодня нет, сообщи об этом пациенту и предложи записаться на завтра
+
+    3. ДЛЯ ЗАВТРА:
+       - Если есть слоты на завтра, выбери самый ранний и используй его для записи
+       - Если слотов на завтра нет, сообщи об этом пациенту
+
+    4. ВСЕГДА выполняй запись одной функцией reserve_reception_for_patient с выбранным временем
+
+    ## ПРИМЕРЫ
+
+    Пример 1: Запись на сегодня
+    Пациент: "Запишите меня на сегодня"
+    Доступные слоты на сегодня: ["10:00", "14:30", "16:00"]
+    Действие: reserve_reception_for_patient(patient_id="123", date_from_patient="2025-03-31 10:00", trigger_id=1)
+
+    Пример 2: Запись на завтра
+    Пациент: "Запишите меня на завтра"
+    Доступные слоты на завтра: ["09:30", "11:00", "15:30"]
+    Действие: reserve_reception_for_patient(patient_id="123", date_from_patient="2025-04-01 09:30", trigger_id=1)
+
+    Пример 3: Нет доступных слотов
+    Пациент: "Запишите меня на сегодня"
+    Доступные слоты на сегодня: []
+    Действие: Сообщение об отсутствии доступных слотов
+
+    ВАЖНО: Никогда не используй which_time_in_certain_day, если пациент прямо просит записать его. 
+    Сразу используй указанные выше доступные слоты для выбора времени.
+    """
