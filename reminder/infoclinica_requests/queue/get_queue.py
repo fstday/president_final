@@ -95,7 +95,7 @@ def get_queue():
 def parse_and_save_queue_info(xml_response):
     """
     Парсит XML-ответ от API Инфоклиника и сохраняет данные в БД.
-    Обновлено для работы с новой структурой моделей.
+    Обновлено для сохранения информации о докторах.
     """
     try:
         root = ET.fromstring(xml_response)
@@ -178,6 +178,55 @@ def parse_and_save_queue_info(xml_response):
                 action_fdate = queue_info.find("ns:ACTIONFDATE", namespace)
                 action_fdate = parse_date(action_fdate.text) if action_fdate is not None else None
 
+                # Обработка информации о докторе
+                doctor = None
+                doctor_code_element = queue_info.find("ns:DCODE", namespace)
+                doctor_name_element = queue_info.find("ns:DNAME", namespace)
+
+                if doctor_code_element is not None and doctor_code_element.text:
+                    doctor_code = int(doctor_code_element.text)
+                    doctor_name = doctor_name_element.text if doctor_name_element is not None else "Неизвестный доктор"
+
+                    # Найти или создать доктора
+                    doctor, created = Doctor.objects.get_or_create(
+                        doctor_code=doctor_code,
+                        defaults={
+                            "full_name": doctor_name,
+                            "clinic": target_branch  # Устанавливаем клинику доктора как target_branch
+                        }
+                    )
+
+                    if not created and doctor.full_name != doctor_name:
+                        # Обновляем имя, если оно изменилось
+                        doctor.full_name = doctor_name
+                        doctor.save()
+
+                    # Обработка специализации/отделения доктора
+                    depnum_element = queue_info.find("ns:DEPNUM", namespace)
+                    depname_element = queue_info.find("ns:DEPNAME", namespace)
+
+                    if depnum_element is not None and depnum_element.text:
+                        dep_id = int(depnum_element.text)
+                        dep_name = depname_element.text if depname_element is not None else "Неизвестное отделение"
+
+                        # Найти или создать отделение
+                        department, dept_created = Department.objects.get_or_create(
+                            department_id=dep_id,
+                            defaults={
+                                "name": dep_name,
+                                "clinic": target_branch  # Устанавливаем клинику отделения
+                            }
+                        )
+
+                        if not dept_created and department.name != dep_name:
+                            department.name = dep_name
+                            department.save()
+
+                        # Связываем доктора с отделением
+                        if doctor.department != department:
+                            doctor.department = department
+                            doctor.save()
+
                 with transaction.atomic():
                     # Создаем или обновляем пациента
                     patient, _ = Patient.objects.get_or_create(patient_code=patient_code)
@@ -192,19 +241,31 @@ def parse_and_save_queue_info(xml_response):
                         target_branch.save()
 
                     # Создаем или обновляем запись в очереди
+                    queue_data = {
+                        "patient": patient,
+                        "contact_start_date": contact_bdate,
+                        "contact_end_date": contact_fdate,
+                        "reason": reason,
+                        "branch": branch,
+                        "target_branch": target_branch,
+                        "current_state": current_state,
+                        "desired_start_date": action_bdate,
+                        "desired_end_date": action_fdate,
+                    }
+
+                    # Добавляем информацию о докторе и отделении если они есть
+                    if doctor_code_element is not None and doctor_code_element.text:
+                        queue_data["doctor_code"] = int(doctor_code_element.text)
+                        queue_data["doctor_name"] = doctor_name
+
+                    if depnum_element is not None and depnum_element.text:
+                        queue_data["department_number"] = int(depnum_element.text)
+                        queue_data[
+                            "department_name"] = depname_element.text if depname_element is not None else "Неизвестное отделение"
+
                     queue_entry, created = QueueInfo.objects.update_or_create(
                         queue_id=queue_id,
-                        defaults={
-                            "patient": patient,
-                            "contact_start_date": contact_bdate,
-                            "contact_end_date": contact_fdate,
-                            "reason": reason,
-                            "branch": branch,
-                            "target_branch": target_branch,
-                            "current_state": current_state,
-                            "desired_start_date": action_bdate,
-                            "desired_end_date": action_fdate,
-                        }
+                        defaults=queue_data
                     )
 
                     if created:
@@ -216,6 +277,7 @@ def parse_and_save_queue_info(xml_response):
                     logger.info(f"Причина: {reason.reason_name if reason else 'Не указана'}")
                     logger.info(f"Филиал: {branch.name if branch else 'Не указан'}")
                     logger.info(f"Целевой филиал: {target_branch.name if target_branch else 'Не указан'}")
+                    logger.info(f"Доктор: {doctor.full_name if doctor else 'Не указан'}")
 
             except Exception as inner_error:
                 logger.error(f"⚠ Ошибка обработки записи очереди: {inner_error}")

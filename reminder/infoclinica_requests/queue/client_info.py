@@ -137,7 +137,7 @@ def parse_date_string(date_str):
 def parse_and_update_queue_info(xml_response):
     """
     Парсит XML-ответ с информацией об очереди и обновляет данные в БД.
-    Улучшенная версия с поддержкой связей между моделями.
+    Обновлено для сохранения информации о докторах.
     """
     try:
         root = ET.fromstring(xml_response)
@@ -249,6 +249,62 @@ def parse_and_update_queue_info(xml_response):
                     )
                     logger.info(f"✅ Создан новый целевой филиал: {target_branch_id} - {target_branch_name}")
 
+        # Обработка информации о докторе
+        doctor = None
+        doctor_code_element = queue_info_element.find("ns:DCODE", namespace)
+        doctor_name_element = queue_info_element.find("ns:DNAME", namespace)
+
+        if doctor_code_element is not None and doctor_code_element.text:
+            doctor_code = int(doctor_code_element.text)
+            doctor_name = doctor_name_element.text if doctor_name_element is not None else "Неизвестный доктор"
+
+            # Найти или создать доктора
+            doctor, doc_created = Doctor.objects.get_or_create(
+                doctor_code=doctor_code,
+                defaults={
+                    "full_name": doctor_name,
+                    "clinic": target_branch  # Устанавливаем клинику доктора
+                }
+            )
+
+            if not doc_created and doctor.full_name != doctor_name:
+                # Обновляем имя, если оно изменилось
+                doctor.full_name = doctor_name
+                doctor.save()
+                logger.info(f"🔄 Обновлено имя доктора: {doctor_code} → {doctor_name}")
+            elif doc_created:
+                logger.info(f"✅ Создан новый доктор: {doctor_code} - {doctor_name}")
+
+            # Обработка специализации/отделения доктора
+            depnum_element = queue_info_element.find("ns:DEPNUM", namespace)
+            depname_element = queue_info_element.find("ns:DEPNAME", namespace)
+
+            if depnum_element is not None and depnum_element.text:
+                dep_id = int(depnum_element.text)
+                dep_name = depname_element.text if depname_element is not None else "Неизвестное отделение"
+
+                # Найти или создать отделение
+                department, dept_created = Department.objects.get_or_create(
+                    department_id=dep_id,
+                    defaults={
+                        "name": dep_name,
+                        "clinic": target_branch
+                    }
+                )
+
+                if not dept_created and department.name != dep_name:
+                    department.name = dep_name
+                    department.save()
+                    logger.info(f"🔄 Обновлено название отделения: {dep_id} → {dep_name}")
+                elif dept_created:
+                    logger.info(f"✅ Создано новое отделение: {dep_id} - {dep_name}")
+
+                # Связываем доктора с отделением
+                if doctor.department != department:
+                    doctor.department = department
+                    doctor.save()
+                    logger.info(f"🔄 Обновлено отделение доктора {doctor_name}: {department.name}")
+
         # Собираем данные для QueueInfo с учетом новых связей
         queue_data = {
             "patient": patient,
@@ -256,6 +312,16 @@ def parse_and_update_queue_info(xml_response):
             "branch": branch,
             "target_branch": target_branch,
         }
+
+        # Добавляем информацию о докторе если она есть
+        if doctor:
+            queue_data["doctor_code"] = doctor.doctor_code
+            queue_data["doctor_name"] = doctor.full_name
+
+        # Добавляем информацию об отделении если оно есть
+        if doctor and doctor.department:
+            queue_data["department_number"] = doctor.department.department_id
+            queue_data["department_name"] = doctor.department.name
 
         # Добавляем стандартные поля
         fields_mapping = {
@@ -267,10 +333,6 @@ def parse_and_update_queue_info(xml_response):
             "CONTACTFDATE": ("contact_end_date", parse_date_string),
             "ACTIONBDATE": ("desired_start_date", parse_date_string),
             "ACTIONFDATE": ("desired_end_date", parse_date_string),
-            "DCODE": ("doctor_code", int),
-            "DNAME": ("doctor_name", str),
-            "DEPNUM": ("department_number", int),
-            "DEPNAME": ("department_name", str),
         }
 
         for xml_field, (model_field, convert_func) in fields_mapping.items():
@@ -299,7 +361,8 @@ def parse_and_update_queue_info(xml_response):
             # Краткая информация о записи
             reason_info = f" с причиной '{reason.reason_name}'" if reason else " без указания причины"
             branch_info = f" в филиале '{branch.name}'" if branch else ""
-            logger.info(f"📋 Информация о записи: Queue {queue_id}{reason_info}{branch_info}")
+            doctor_info = f" у врача '{doctor.full_name}'" if doctor else ""
+            logger.info(f"📋 Информация о записи: Queue {queue_id}{reason_info}{branch_info}{doctor_info}")
 
     except Exception as e:
         logger.error(f"❌ Ошибка при обработке QUEUE_INFO: {e}", exc_info=True)
