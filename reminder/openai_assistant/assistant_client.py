@@ -267,14 +267,14 @@ class AssistantClient:
             logger.error(f"Error adding message to thread: {e}")
             raise
 
-    def run_assistant(self, thread: Thread, entity, instructions: str = None) -> RunModel:
+    def run_assistant(self, thread, entity, instructions=None):
         """
         Runs the assistant with proper instructions to ensure function calling.
-        Enhanced with better error handling for active runs and available time slots.
+        Enhanced to work with both appointment and patient objects.
 
         Args:
             thread: Thread object
-            entity: Appointment object or Patient object
+            entity: Either Appointment object or Patient object
             instructions: Additional instructions to enforce function calling
 
         Returns:
@@ -307,29 +307,45 @@ class AssistantClient:
             is_appointment = isinstance(entity, Appointment)
 
             if is_appointment:
+                # Get patient and appointment data from appointment
                 appointment = entity
                 patient = appointment.patient
+                patient_code = patient.patient_code
+
+                # Format appointment time
+                appointment_time = "Не указано"
+                if appointment.start_time:
+                    appointment_time = appointment.start_time.strftime("%Y-%m-%d %H:%M")
+
+                # Get doctor name
+                doctor_name = "Не указан"
+                if appointment.doctor:
+                    doctor_name = appointment.doctor.full_name
+
+                # Get clinic name
+                clinic_name = "Не указана"
+                if appointment.clinic:
+                    clinic_name = appointment.clinic.name
             else:
+                # Working directly with patient object
                 patient = entity
-                appointment = Appointment.objects.filter(patient=patient, is_active=True).order_by(
-                    '-start_time').first()
+                patient_code = patient.patient_code
+                appointment = None
 
-            patient_code = patient.patient_code
+                # Try to find active appointment if exists
+                latest_appointment = Appointment.objects.filter(
+                    patient=patient,
+                    is_active=True
+                ).order_by('-start_time').first()
 
-            # Format appointment time
-            appointment_time = "Не указано"
-            if appointment and appointment.start_time:
-                appointment_time = appointment.start_time.strftime("%Y-%m-%d %H:%M")
-
-            # Get doctor name
-            doctor_name = "Не указан"
-            if appointment and appointment.doctor:
-                doctor_name = appointment.doctor.full_name
-
-            # Get clinic name
-            clinic_name = "Не указана"
-            if appointment and appointment.clinic:
-                clinic_name = appointment.clinic.name
+                if latest_appointment:
+                    appointment_time = latest_appointment.start_time.strftime("%Y-%m-%d %H:%M")
+                    doctor_name = latest_appointment.doctor.full_name if latest_appointment.doctor else "Не указан"
+                    clinic_name = latest_appointment.clinic.name if latest_appointment.clinic else "Не указана"
+                else:
+                    appointment_time = "Нет активной записи"
+                    doctor_name = "Не указан"
+                    clinic_name = "Не указана"
 
             # Get current Moscow date and time (Moscow is UTC+3)
             from datetime import timezone as tz
@@ -342,8 +358,8 @@ class AssistantClient:
             current_moscow_full = current_moscow_datetime.strftime("%Y-%m-%d %H:%M")
 
             # Get today's and tomorrow's dates in Moscow time
-            today = current_moscow_datetime.date()
-            tomorrow = (current_moscow_datetime + timedelta(days=1)).date()
+            today = current_moscow_datetime.strftime("%Y-%m-%d")
+            tomorrow = (current_moscow_datetime + timedelta(days=1)).strftime("%Y-%m-%d")
 
             # Calculate dates for "after tomorrow" and "a week later"
             after_tomorrow = (current_moscow_datetime + timedelta(days=2)).strftime("%Y-%m-%d")
@@ -399,16 +415,21 @@ class AssistantClient:
 
             # Add info about the patient and appointment
             patient_info = f"""
-            # ВАЖНАЯ ИНФОРМАЦИЯ О ПАЦИЕНТЕ И ПРИЕМЕ:
+            # ВАЖНАЯ ИНФОРМАЦИЯ О ПАЦИЕНТЕ:
 
             - Текущий пациент: {patient.full_name} (ID: {patient_code})
-            - Запись: {f"ID {appointment.appointment_id}, назначена на {appointment_time}" if appointment else "Нет активной записи"}
-            - Врач: {doctor_name}
-            - Клиника: {clinic_name}
-
-            Используй эту информацию при обработке запроса пациента. 
-            ID пациента ({patient_code}) следует использовать в вызовах функций.
             """
+
+            if appointment:
+                patient_info += f"""
+                - Запись: ID {appointment.appointment_id}, назначена на {appointment_time}
+                - Врач: {doctor_name}
+                - Клиника: {clinic_name}
+                """
+            else:
+                patient_info += """
+                - У пациента нет активной записи на прием
+                """
 
             # Add current date and time context
             datetime_context = f"""
@@ -431,12 +452,8 @@ class AssistantClient:
             Используй эту информацию для определения даты в запросах.
             """
 
-            # Get available slots information
-            from reminder.openai_assistant.api_views import format_available_slots_for_prompt
-            available_slots_info = format_available_slots_for_prompt(patient, today, tomorrow)
-
             # Combine all instructions
-            full_instructions = instructions + "\n\n" + patient_info + "\n\n" + datetime_context + "\n\n" + available_slots_info
+            full_instructions = instructions + "\n\n" + patient_info + "\n\n" + datetime_context
 
             # Create assistant run with combined instructions
             try:

@@ -338,9 +338,3 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
             'status': 'error',
             'message': 'Запись не найдена'
         }
-
-
-patient_code = '990000612'
-year_from_patient_for_returning = "2025-03-26 17:00"
-
-reserve_reception_for_patient(patient_code, year_from_patient_for_returning, trigger_id=3)
