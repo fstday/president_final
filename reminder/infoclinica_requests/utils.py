@@ -64,8 +64,6 @@ current_date_time_for_xml = datetime.now().strftime('%Y%m%d%H%M%S')
 redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
 
 
-
-
 def normalize_time_for_receptions(free_intervals):
     """
     Функция для перевода времени из ответа сервера к формату HH:MM

@@ -119,6 +119,16 @@ class Patient(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Дата создания записи")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Дата обновления записи")
 
+    # Добавьте эти поля в модель Patient
+    last_queue_reason_code = models.CharField(
+        max_length=20, null=True, blank=True,
+        verbose_name="Последняя причина очереди (код)"
+    )
+    last_queue_reason_name = models.CharField(
+        max_length=255, null=True, blank=True,
+        verbose_name="Последняя причина очереди (название)"
+    )
+
     class Meta:
         verbose_name = "Пациент"
         verbose_name_plural = "Пациенты"
@@ -223,19 +233,26 @@ class Call(models.Model):
     """Звонок пациенту"""
     CALL_TYPE_CHOICES = [
         ('today', 'Сегодня'),
-        ('tomorrow', 'Завтра')
+        ('tomorrow', 'Завтра'),
+        ('queue', 'Очередь')  # Добавим новый тип для звонков из очереди
     ]
 
     appointment = models.ForeignKey(
         Appointment, on_delete=models.CASCADE,
         related_name="calls",
-        verbose_name="Запись на прием"
+        verbose_name="Запись на прием",
+        null=True, blank=True  # Делаем поле необязательным
+    )
+    patient_code = models.BigIntegerField(
+        null=True, blank=True,
+        verbose_name="Код пациента"
     )
     order_key = models.CharField(max_length=255, verbose_name="Ключ заказа в ACS")
     status_id = models.IntegerField(null=True, blank=True, verbose_name="Статус звонка")
     audio_link = models.TextField(null=True, blank=True, verbose_name="Ссылка на аудио")
     is_added = models.BooleanField(default=False, verbose_name="Добавлен")
     call_type = models.CharField(max_length=10, choices=CALL_TYPE_CHOICES, verbose_name="Тип звонка")
+    queue_id = models.BigIntegerField(null=True, blank=True, verbose_name="ID очереди")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Дата создания записи")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Дата обновления записи")
 
@@ -245,12 +262,11 @@ class Call(models.Model):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=['appointment', '-created_at']),
+            models.Index(fields=['patient_code', '-created_at']),  # Индекс по коду пациента
             models.Index(fields=['order_key']),
             models.Index(fields=['call_type']),
+            models.Index(fields=['queue_id']),  # Индекс по ID очереди
         ]
-
-    def __str__(self):
-        return f"Call for appointment {self.appointment.appointment_id} with order_key {self.order_key}"
 
 
 class QueueReason(models.Model):
@@ -361,6 +377,15 @@ class QueueInfo(models.Model):
     department_name = models.CharField(
         max_length=255, null=True, blank=True,
         verbose_name="Название отделения (DEPNAME)"
+    )
+
+    internal_reason_code = models.CharField(
+        max_length=20, null=True, blank=True,
+        verbose_name="Внутренний код причины"
+    )
+    internal_reason_name = models.CharField(
+        max_length=255, null=True, blank=True,
+        verbose_name="Внутреннее название причины"
     )
 
     # Metadata
@@ -589,3 +614,26 @@ class AvailableTimeSlot(models.Model):
 
     def __str__(self):
         return f"Слот {self.date} {self.time} для {self.patient.full_name}"
+
+
+class QueueReasonMapping(models.Model):
+    """Сопоставление причин постановки в очередь с внутренними кодами"""
+    reason = models.ForeignKey(
+        QueueReason, on_delete=models.CASCADE,
+        related_name="mappings",
+        verbose_name="Причина из Инфоклиники"
+    )
+    internal_code = models.CharField(
+        max_length=20, verbose_name="Внутренний код"
+    )
+    internal_name = models.CharField(
+        max_length=255, verbose_name="Внутреннее название"
+    )
+
+    class Meta:
+        verbose_name = "Сопоставление причин"
+        verbose_name_plural = "Сопоставления причин"
+        unique_together = ['reason', 'internal_code']
+
+    def __str__(self):
+        return f"{self.reason.reason_name} → {self.internal_name} ({self.internal_code})"

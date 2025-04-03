@@ -95,7 +95,7 @@ def parse_and_save_queue_info(xml_response):
     """
     Парсит XML-ответ от API Инфоклиника и сохраняет данные в БД.
     Обновлено для корректного сохранения информации о целевой клинике (TOFILIAL)
-    и использования её для последующих операций.
+    и сохранения причины очереди для пациента.
     """
     try:
         root = ET.fromstring(xml_response)
@@ -120,20 +120,40 @@ def parse_and_save_queue_info(xml_response):
                 # Обработка причины (ADDID)
                 add_id_element = queue_info.find("ns:ADDID", namespace)
                 add_id = int(add_id_element.text) if add_id_element is not None else None
+                add_name_element = queue_info.find("ns:ADDNAME", namespace)
+                add_name = add_name_element.text if add_name_element is not None else None
 
                 # Получаем или создаем объект QueueReason
                 reason = None
+                internal_code = None
+                internal_name = None
                 if add_id is not None:
-                    reason, _ = QueueReason.objects.get_or_create(
+                    reason, created = QueueReason.objects.get_or_create(
                         reason_id=add_id,
-                        defaults={"reason_name": f"Причина {add_id}"}  # Временное имя
+                        defaults={"reason_name": add_name or f"Причина {add_id}"}
                     )
 
-                # Обработка исходного филиала (FILIAL) - больше не используется для операций
-                # Не обрабатываем исходный филиал, так как нас интересует только TOFILIAL
-                branch = None
+                    # Если название причины изменилось, обновляем его
+                    if not created and add_name and reason.reason_name != add_name:
+                        reason.reason_name = add_name
+                        reason.save()
+                        logger.info(f"🔄 Обновлено название причины: {add_id} → {add_name}")
 
-                # КРИТИЧЕСКИ ВАЖНО: Обработка целевого филиала (TOFILIAL) - единственная клиника для всех операций
+                    # Пытаемся найти соответствующий внутренний код
+                    try:
+                        mapping = QueueReasonMapping.objects.get(reason=reason)
+                        internal_code = mapping.internal_code
+                        internal_name = mapping.internal_name
+                        logger.info(
+                            f"✅ Найдено сопоставление для причины {reason.reason_name}: {internal_code} ({internal_name})")
+                    except QueueReasonMapping.DoesNotExist:
+                        logger.warning(f"⚠ Не найдено сопоставление для причины {reason.reason_name} (ID: {add_id})")
+                        # Используем значение по умолчанию
+                        internal_code = "00PP0consulta"  # Консультация по умолчанию
+                        internal_name = "Консультация (по умолчанию)"
+                        logger.info(f"ℹ️ Установлено значение по умолчанию: {internal_code}")
+
+                # Обработка целевого филиала (TOFILIAL)
                 target_branch = None
                 target_branch_id_element = queue_info.find("ns:TOFILIAL", namespace)
                 if target_branch_id_element is not None and target_branch_id_element.text:
@@ -180,6 +200,10 @@ def parse_and_save_queue_info(xml_response):
                 doctor_code_element = queue_info.find("ns:DCODE", namespace)
                 doctor_name_element = queue_info.find("ns:DNAME", namespace)
 
+                # Объявляем переменные depnum_element и depname_element в начале блока
+                depnum_element = queue_info.find("ns:DEPNUM", namespace)
+                depname_element = queue_info.find("ns:DEPNAME", namespace)
+
                 if doctor_code_element is not None and doctor_code_element.text:
                     doctor_code = int(doctor_code_element.text)
                     doctor_name = doctor_name_element.text if doctor_name_element is not None else "Неизвестный доктор"
@@ -205,9 +229,6 @@ def parse_and_save_queue_info(xml_response):
                         logger.info(f"✅ Создан новый доктор: {doctor_code} - {doctor_name}")
 
                     # Обработка специализации/отделения доктора
-                    depnum_element = queue_info.find("ns:DEPNUM", namespace)
-                    depname_element = queue_info.find("ns:DEPNAME", namespace)
-
                     if depnum_element is not None and depnum_element.text:
                         dep_id = int(depnum_element.text)
                         dep_name = depname_element.text if depname_element is not None else "Неизвестное отделение"
@@ -249,6 +270,13 @@ def parse_and_save_queue_info(xml_response):
                         )
                         logger.info(f"✅ Создан новый пациент с кодом {patient_code}")
 
+                    # ВАЖНО: Сохраняем причину очереди в объекте пациента
+                    if internal_code:
+                        patient.last_queue_reason_code = internal_code
+                        patient.last_queue_reason_name = internal_name
+                        patient.save(update_fields=['last_queue_reason_code', 'last_queue_reason_name'])
+                        logger.info(f"🔄 Обновлена причина очереди для пациента {patient.patient_code}: {internal_code}")
+
                     # Проверяем, есть ли существующие записи для этого пациента и клиники
                     existing_appointments = Appointment.objects.filter(
                         patient=patient,
@@ -271,6 +299,8 @@ def parse_and_save_queue_info(xml_response):
                         "contact_start_date": contact_bdate,
                         "contact_end_date": contact_fdate,
                         "reason": reason,
+                        "internal_reason_code": internal_code,
+                        "internal_reason_name": internal_name,
                         "branch": None,  # Игнорируем исходный филиал
                         "target_branch": target_branch,  # КРИТИЧЕСКИ ВАЖНО: Целевой филиал используется для MSH.99
                         "current_state": current_state,
@@ -302,9 +332,11 @@ def parse_and_save_queue_info(xml_response):
                     logger.info(f"📋 Запись в очереди: {queue_id}")
                     logger.info(f"  Пациент: {patient.full_name} (ID: {patient.patient_code})")
                     logger.info(f"  Причина: {reason.reason_name if reason else 'Не указана'}")
+                    logger.info(f"  Внутренний код: {internal_code if internal_code else 'Не определен'}")
                     logger.info(
                         f"  TOFILIAL: {target_branch.name} (ID: {target_branch.clinic_id}) - будет использован в MSH.99" if target_branch else "⚠ TOFILIAL ОТСУТСТВУЕТ!")
-                    logger.info(f"  Доктор: {doctor.full_name} (ID: {doctor.doctor_code}) если есть")
+                    logger.info(
+                        f"  Доктор: {doctor.full_name if doctor else 'Не назначен'} (ID: {doctor.doctor_code if doctor else 'Н/Д'})")
                     logger.info(f"  Состояние: {current_state}")
 
             except Exception as inner_error:
