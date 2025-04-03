@@ -35,7 +35,7 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
     """
     Функция резервирует время при его успешном нахождении в свободных окошках.
     Отправляет XML запрос и резервирует свободное время за клиентом. Метод: WEB_SCHEDULE_REC_RESERVE
-    Обновлена для работы с полным списком доступных времен.
+    Модифицирована для правильного использования TOFILIAL (целевой клиники) из БД.
 
     :param result_time: Выбранное время для записи
     :param doctor_id: ID врача
@@ -53,24 +53,33 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
         # Получаем информацию о пациенте
         found_patient = Patient.objects.get(patient_code=patient_id)
 
-        # Получаем информацию о филиале через очередь пациента
-        latest_queue = found_patient.queue_entries.order_by('-created_at').first()
+        # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Получаем target_branch (TOFILIAL) из очереди пациента
+        target_branch_id = None
 
-        # Инициализируем ID филиала значением по умолчанию
-        filial_id = 1
-
-        # Если очередь существует, получаем ID филиала из ветви
-        if latest_queue and latest_queue.branch:
-            filial_id = latest_queue.branch.clinic_id
-
-        # Также проверяем, есть ли у пациента активная запись с информацией о клинике
-        latest_appointment = Appointment.objects.filter(
-            patient=found_patient,
-            is_active=True
+        # Сначала ищем в активных очередях
+        latest_queue = QueueInfo.objects.filter(
+            patient=found_patient
         ).order_by('-created_at').first()
 
-        if latest_appointment and latest_appointment.clinic:
-            filial_id = latest_appointment.clinic.clinic_id
+        if latest_queue and latest_queue.target_branch:
+            target_branch_id = latest_queue.target_branch.clinic_id
+            logger.info(f"✅ Получен TOFILIAL из очереди: {target_branch_id}")
+        else:
+            # Если в очереди не нашли, проверяем в записях
+            latest_appointment = Appointment.objects.filter(
+                patient=found_patient,
+                is_active=True
+            ).order_by('-created_at').first()
+
+            if latest_appointment and latest_appointment.clinic:
+                target_branch_id = latest_appointment.clinic.clinic_id
+                logger.info(f"✅ Получен TOFILIAL из записи: {target_branch_id}")
+
+        # Если не нашли ID клиники, используем значение по умолчанию
+        if not target_branch_id:
+            logger.warning(f"⚠ КРИТИЧЕСКАЯ ОШИБКА: TOFILIAL не найден для пациента {patient_id}!")
+            logger.warning("⚠ Используем значение по умолчанию 1, но это может привести к ошибкам!")
+            target_branch_id = 1
 
         # Найти доктора по doctor_id
         doctor = None
@@ -80,13 +89,13 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
         except Doctor.DoesNotExist:
             logger.warning(f"Врач с кодом {doctor_id} не найден")
 
-        # Найти клинику по filial_id
+        # Найти клинику по target_branch_id
         clinic = None
         try:
-            clinic = Clinic.objects.get(clinic_id=filial_id)
+            clinic = Clinic.objects.get(clinic_id=target_branch_id)
             logger.info(f"Найдена клиника: {clinic.name}")
         except Clinic.DoesNotExist:
-            logger.warning(f"Клиника с ID {filial_id} не найдена")
+            logger.warning(f"Клиника с ID {target_branch_id} не найдена")
 
         # Получить причину и отделение из QueueInfo, если возможно
         reason = None
@@ -179,7 +188,7 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
         <SCHLIST/>
         """
 
-    # Финальный XML-запрос
+    # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Используем target_branch_id (TOFILIAL) в MSH.99 запроса
     xml_request = f"""
     <WEB_SCHEDULE_REC_RESERVE xmlns="http://sdsys.ru/">
       <MSH>
@@ -193,7 +202,7 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
         </MSH.9>
         <MSH.10>f2e89dbc1e813cb680d2f847</MSH.10>
         <MSH.18>UTF-8</MSH.18>
-        <MSH.99>{filial_id}</MSH.99>
+        <MSH.99>{target_branch_id}</MSH.99>
       </MSH>
       <SCHEDULE_REC_RESERVE_IN>
         {xml_schedule_reserve_in}
@@ -202,7 +211,7 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
     """
 
     logger.info(
-        f"Отправляем запрос на резервирование: DCODE={doctor_id}, WORKDATE={workdate}, BHOUR={bhour_str}, BMIN={bmin_str}")
+        f"Отправляем запрос на резервирование: DCODE={doctor_id}, WORKDATE={workdate}, BHOUR={bhour_str}, BMIN={bmin_str}, TOFILIAL={target_branch_id}")
 
     try:
         response = requests.post(
@@ -235,7 +244,7 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                                 defaults={
                                     'patient': found_patient,
                                     'doctor': doctor,
-                                    'clinic': clinic,
+                                    'clinic': clinic,  # TOFILIAL
                                     'department': department,
                                     'reason': reason,
                                     'is_infoclinica_id': True,

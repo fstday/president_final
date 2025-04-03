@@ -32,9 +32,7 @@ key_file_path = os.path.join(certs_dir, 'key.pem')
 def appointment_time_for_patient(patient_code, year_from_patient_for_returning=None):
     """
     Функция для получения информации о записи пациента.
-
-    Согласно документации API InfoClinica, идентификатор назначения (SCHEDID)
-    должен быть ID записи, а не ID пациента.
+    Модифицирована для правильного использования TOFILIAL.
 
     :param patient_code: Код пациента
     :param year_from_patient_for_returning: Дата-время для пациента
@@ -76,14 +74,24 @@ def appointment_time_for_patient(patient_code, year_from_patient_for_returning=N
         appointment_id = appointment.appointment_id
         logger.info(f"Найдена активная запись с ID: {appointment_id}")
 
-        # Определяем ID филиала
+        # КРИТИЧЕСКИ ВАЖНО: Определяем TOFILIAL для использования в MSH.99
         target_filial_id = 1  # Значение по умолчанию
 
+        # Сначала ищем в текущей записи
         if appointment.clinic:
             target_filial_id = appointment.clinic.clinic_id
-            logger.info(f"Используем ID клиники из записи: {target_filial_id}")
+            logger.info(f"Используем TOFILIAL из записи: {target_filial_id}")
+        else:
+            # Если в записи нет клиники, ищем в очереди
+            queue_entry = QueueInfo.objects.filter(patient=found_patient).order_by('-created_at').first()
+            if queue_entry and queue_entry.target_branch:
+                target_filial_id = queue_entry.target_branch.clinic_id
+                logger.info(f"Используем TOFILIAL из очереди: {target_filial_id}")
+            else:
+                logger.warning(f"⚠ КРИТИЧЕСКАЯ ОШИБКА: TOFILIAL не найден для пациента {patient_code}!")
+                logger.warning("⚠ Используем значение по умолчанию 1, но это может привести к ошибкам!")
 
-        # XML запрос с правильным использованием SCHEDID (ID записи)
+        # XML запрос с использованием TOFILIAL в MSH.99
         xml_request = f'''
         <WEB_SCHEDULE_INFO xmlns="http://sdsys.ru/" xmlns:tns="http://sdsys.ru/">
           <MSH>
@@ -99,12 +107,13 @@ def appointment_time_for_patient(patient_code, year_from_patient_for_returning=N
               <MSH.99>{target_filial_id}</MSH.99>
           </MSH>
           <SCHEDULE_INFO_IN>
-              <SCHEDID>{appointment_id}</SCHEDID> <!-- ID записи, а не ID пациента -->
+              <SCHEDID>{appointment_id}</SCHEDID>
           </SCHEDULE_INFO_IN>
         </WEB_SCHEDULE_INFO>
         '''
 
-        logger.info(f"Отправляем запрос на получение информации о записи {appointment_id}")
+        logger.info(
+            f"Отправляем запрос с TOFILIAL={target_filial_id} для получения информации о записи {appointment_id}")
         response = requests.post(
             url=infoclinica_api_url,
             headers={'X-Forwarded-Host': infoclinica_x_forwarded_host, 'Content-Type': 'text/xml'},

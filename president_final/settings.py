@@ -140,6 +140,14 @@ LOGGING = {
         'api_concise': {
             'format': '{asctime} {levelname} {message}',
             'style': '{',
+        },
+        'detailed': {
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {pathname}:{lineno} {message}',
+            'style': '{',
+        },
+        'infoclinica_detailed': {
+            'format': '### {levelname} ### {asctime} ### {module} ### {message}',
+            'style': '{',
         }
     },
     'filters': {
@@ -149,7 +157,7 @@ LOGGING = {
     },
     'handlers': {
         'console': {
-            'level': 'INFO',  # Change from DEBUG to INFO
+            'level': 'INFO',
             'class': 'logging.StreamHandler',
             'formatter': 'simple',
         },
@@ -160,7 +168,7 @@ LOGGING = {
             'formatter': 'verbose',
         },
         'api_file': {
-            'level': 'INFO',  # Keep API calls at INFO or higher
+            'level': 'INFO',
             'class': 'logging.FileHandler',
             'filename': BASE_DIR / 'logs' / 'api_calls.log',
             'formatter': 'api_concise',
@@ -172,6 +180,18 @@ LOGGING = {
             'formatter': 'verbose',
             'filters': ['require_debug_true'],
         },
+        'infoclinica_file': {
+            'level': 'DEBUG',
+            'class': 'logging.FileHandler',
+            'filename': BASE_DIR / 'logs' / 'infoclinica_debug.log',
+            'formatter': 'infoclinica_detailed',
+        },
+        'reservation_file': {
+            'level': 'DEBUG',
+            'class': 'logging.FileHandler',
+            'filename': BASE_DIR / 'logs' / 'reservations.log',
+            'formatter': 'detailed',
+        }
     },
     'loggers': {
         '': {  # Root logger
@@ -186,7 +206,7 @@ LOGGING = {
         },
         '_base_client': {  # OpenAI client library
             'handlers': ['api_file'],
-            'level': 'WARNING',  # Only log warnings and errors
+            'level': 'WARNING',
             'propagate': False,
         },
         '_trace': {  # HTTP request tracing
@@ -195,10 +215,20 @@ LOGGING = {
             'propagate': False,
         },
         'reminder.infoclinica': {
-            'handlers': ['console', 'file'],
-            'level': 'INFO',
+            'handlers': ['console', 'file', 'infoclinica_file'],
+            'level': 'DEBUG',  # Изменено с INFO на DEBUG
             'propagate': False,
         },
+        'reminder.infoclinica_requests.schedule': {
+            'handlers': ['console', 'reservation_file'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+        'reminder.infoclinica_requests.schedule.reserve_reception_for_patient': {
+            'handlers': ['console', 'reservation_file', 'infoclinica_file'],
+            'level': 'DEBUG',
+            'propagate': False,
+        }
     },
 }
 

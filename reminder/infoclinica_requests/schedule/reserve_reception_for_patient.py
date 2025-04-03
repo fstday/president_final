@@ -116,12 +116,12 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
                         'message': 'No doctor code found for this patient'
                     }
 
-                if latest_queue.branch:
-                    target_filial_id = latest_queue.branch.clinic_id
-                    print(f"Target clinic ID from queue: {target_filial_id}")
+                # В блоке определения филиала
+                if latest_queue and latest_queue.target_branch:
+                    target_branch_id = latest_queue.target_branch.clinic_id
+                    logger.info(f"Target clinic ID from queue: {target_branch_id}")
                 else:
-                    target_filial_id = 1  # Default value
-                    print(f"Using default target clinic ID: {target_filial_id}")
+                    target_branch_id = 1  # Default value
             else:
                 print("⚠️ No appointments or queue entries found for this patient")
                 return {
@@ -338,3 +338,6 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
             'status': 'error',
             'message': 'Запись не найдена'
         }
+
+
+reserve_reception_for_patient('990000735', date_from_patient='2025-04-01 14:00:00', trigger_id=1)

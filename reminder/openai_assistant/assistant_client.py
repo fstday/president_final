@@ -270,7 +270,7 @@ class AssistantClient:
     def run_assistant(self, thread, entity, instructions=None):
         """
         Runs the assistant with proper instructions to ensure function calling.
-        Enhanced to work with both appointment and patient objects.
+        Enhanced to work with both appointment and patient objects and includes available slots information.
 
         Args:
             thread: Thread object
@@ -452,8 +452,40 @@ class AssistantClient:
             Используй эту информацию для определения даты в запросах.
             """
 
+            # Get and format available slots for the patient
+            from reminder.openai_assistant.api_views import format_available_slots_for_prompt
+            today_date = current_moscow_datetime.date()
+            tomorrow_date = (current_moscow_datetime + timedelta(days=1)).date()
+            available_slots_context = format_available_slots_for_prompt(patient, today_date, tomorrow_date)
+
+            # Add booking instructions for specific time periods
+            booking_instructions = """
+            # КРИТИЧЕСКИ ВАЖНЫЙ АЛГОРИТМ ДЛЯ ЗАПИСИ:
+
+            Когда пользователь просит записать его на прием (например, "запиши на сегодня после обеда"):
+
+            1. ОБЯЗАТЕЛЬНО выбери конкретное время из доступных слотов выше
+            2. Для запроса "после обеда" или "днем" выбирай время после 13:30
+            3. Для запроса "утром" или "с утра" выбирай время до 12:00
+            4. Для запроса "вечером" выбирай время после 16:00
+            5. СРАЗУ ВЫЗЫВАЙ reserve_reception_for_patient с выбранным временем
+            6. НЕ ОСТАНАВЛИВАЙСЯ на этапе показа доступных времен
+
+            ПРИМЕРЫ ЗАПРОСОВ И ДЕЙСТВИЙ:
+            - "запиши на сегодня после обеда" → reserve_reception_for_patient с первым доступным временем после 13:30
+            - "запиши на завтра утром" → reserve_reception_for_patient с первым доступным временем до 12:00
+            - "запиши на вечер" → reserve_reception_for_patient с первым доступным временем после 16:00
+
+            Если пользователь явно не указал время, но просит записать его:
+            1. Предлагай конкретное время из доступных слотов
+            2. НИКОГДА не вызывай which_time_in_certain_day для таких запросов
+            3. ВСЕГДА ЗАВЕРШАЙ ЗАПИСЬ вызовом reserve_reception_for_patient
+
+            ВАЖНО: Завершай весь процесс записи за один шаг!
+            """
+
             # Combine all instructions
-            full_instructions = instructions + "\n\n" + patient_info + "\n\n" + datetime_context
+            full_instructions = instructions + "\n\n" + patient_info + "\n\n" + datetime_context + "\n\n" + available_slots_context + "\n\n" + booking_instructions
 
             # Create assistant run with combined instructions
             try:

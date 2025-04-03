@@ -210,33 +210,31 @@ def parse_and_update_queue_info(xml_response):
         target_branch_id_element = queue_info_element.find("ns:TOFILIAL", namespace)
         target_branch_name_element = queue_info_element.find("ns:TOFILIALNAME", namespace)
 
+        # Приоритет отдается TOFILIAL
         if target_branch_id_element is not None and target_branch_id_element.text:
             target_branch_id = int(target_branch_id_element.text)
             target_branch_name = target_branch_name_element.text if target_branch_name_element is not None else "Неизвестный филиал"
 
-            # Если целевой филиал совпадает с исходным, используем тот же объект
-            if branch and branch.clinic_id == target_branch_id:
-                target_branch = branch
-            else:
-                # Иначе ищем или создаем целевой филиал
-                try:
-                    target_branch = Clinic.objects.get(clinic_id=target_branch_id)
+            # Используем TOFILIAL как основной филиал
+            branch = None
+            try:
+                branch = Clinic.objects.get(clinic_id=target_branch_id)
 
-                    # Обновляем имя клиники, если оно изменилось
-                    if target_branch.name != target_branch_name and target_branch_name != "Неизвестный филиал":
-                        target_branch.name = target_branch_name
-                        target_branch.save()
-                        logger.info(f"🔄 Обновлено название целевого филиала: {target_branch_id} → {target_branch_name}")
-                except Clinic.DoesNotExist:
-                    # Если не существует в БД, создаем новую запись
-                    target_branch = Clinic.objects.create(
-                        clinic_id=target_branch_id,
-                        name=target_branch_name,
-                        address="",  # Временное значение
-                        phone="",  # Временное значение
-                        timezone=3  # Временное значение (GMT+3 для России)
-                    )
-                    logger.info(f"✅ Создан новый целевой филиал: {target_branch_id} - {target_branch_name}")
+                # Обновляем имя клиники, если оно изменилось
+                if branch.name != target_branch_name and target_branch_name != "Неизвестный филиал":
+                    branch.name = target_branch_name
+                    branch.save()
+                    logger.info(f"🔄 Обновлено название целевого филиала: {target_branch_id} → {target_branch_name}")
+            except Clinic.DoesNotExist:
+                # Если не существует в БД, создаем новую запись
+                branch = Clinic.objects.create(
+                    clinic_id=target_branch_id,
+                    name=target_branch_name,
+                    address="",  # Временное значение
+                    phone="",  # Временное значение
+                    timezone=3  # Временное значение (GMT+3 для России)
+                )
+                logger.info(f"✅ Создан новый целевой филиал: {target_branch_id} - {target_branch_name}")
 
         # Собираем данные для QueueInfo с учетом новых связей
         queue_data = {

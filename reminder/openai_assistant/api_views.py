@@ -10,7 +10,7 @@ from django.views.decorators.http import require_http_methods
 from django.conf import settings
 from django.utils import timezone
 
-from reminder.models import Patient, Appointment, Assistant, Thread, Run, IgnoredPatient
+from reminder.models import Patient, Appointment, Assistant, Thread, Run, IgnoredPatient, AvailableTimeSlot
 from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
 from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
 from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import reserve_reception_for_patient
@@ -647,165 +647,162 @@ def process_appointment_time_response(response_data):
 @csrf_exempt
 @require_http_methods(["POST"])
 def process_voicebot_request(request):
-    """
-    Handles requests from the voice bot, ensuring proper response formatting.
-    Modified to work with patient_code as the primary identifier.
-
-    Accepts:
-    - patient_code: Required - Unique identifier of the patient
-    - user_input: Required - User's message text
-    - appointment_id: Optional - Used only for operations specifically requiring an appointment ID
-    """
     try:
         # Parse request data
         data = json.loads(request.body)
         patient_code = data.get('patient_code')
         user_input = data.get('user_input', '').strip()
-        appointment_id = data.get('appointment_id')  # Optional, used only if needed
-
-        logger.info(f"\n\n=================================================\n\n"
-                    f"Processing request: "
-                    f"patient_code={patient_code}, "
-                    f"user_input='{user_input}', "
-                    f"appointment_id={appointment_id}"
-                    f"\n\n=================================================\n\n")
 
         # Validate required parameters
         if not patient_code or not user_input:
-            logger.warning("Missing required parameters")
-            return JsonResponse({
-                'status': 'bad_user_input',
-                'message': 'Missing required parameters: patient_code and user_input'
-            })
+            return JsonResponse({'status': 'bad_user_input'})
 
-        # Check if patient exists
+        # Get patient
         try:
             patient = Patient.objects.get(patient_code=patient_code)
         except Patient.DoesNotExist:
-            logger.error(f"Patient with code {patient_code} not found")
-            return JsonResponse({
-                'status': 'error_med_element',
-                'message': 'Patient not found'
-            })
+            return JsonResponse({'status': 'error_med_element', 'message': 'Patient not found'})
 
-        # Check if patient is in the ignored list
-        if IgnoredPatient.objects.filter(patient_code=patient_code).exists():
-            logger.warning(f"Patient {patient_code} is in ignored list")
-            return JsonResponse({
-                'status': 'error_med_element',
-                'message': 'Patient is in ignored list'
-            })
+        # Detect booking intent via simple check - just to prefetch slots
+        booking_intent = any(word in user_input.lower() for word in
+                             ["запиш", "записать", "перенес", "запись"])
 
-        # Check if the patient has an active appointment (for rescheduling/checking/cancellation)
-        # If appointment_id is provided, use that specific appointment instead
-        appointment = None
-        if appointment_id:
-            try:
-                appointment = Appointment.objects.get(appointment_id=appointment_id, is_active=True)
-                if appointment.patient.patient_code != patient_code:
-                    logger.warning(f"Appointment {appointment_id} does not belong to patient {patient_code}")
-                    return JsonResponse({
-                        'status': 'error_med_element',
-                        'message': 'Appointment does not belong to this patient'
-                    })
-            except Appointment.DoesNotExist:
-                logger.warning(f"Specified appointment {appointment_id} not found or not active")
-                # Fall back to looking for any active appointment for this patient
-                appointment = Appointment.objects.filter(patient=patient, is_active=True).order_by(
-                    '-start_time').first()
-        else:
-            # Look for any active appointment for this patient
-            appointment = Appointment.objects.filter(patient=patient, is_active=True).order_by('-start_time').first()
+        # If booking intent, prefetch available slots and store in database
+        today_slots = []
+        tomorrow_slots = []
 
-        # Initialize assistant client
         assistant_client = AssistantClient()
 
-        # Get or create a thread for dialog
-        thread = None
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            try:
-                # If we have an appointment, use its ID for the thread
-                # Otherwise, use the patient code directly
-                thread_id = appointment.appointment_id if appointment else f"patient_{patient_code}"
-                thread = assistant_client.get_or_create_thread(thread_id, patient)
-                break
-            except Exception as e:
-                if attempt < max_attempts - 1:
-                    logger.warning(f"Failed to get/create thread (attempt {attempt + 1}/{max_attempts}): {e}")
-                    time.sleep(1)  # Brief delay before retry
-                else:
-                    logger.error(f"Failed to get/create thread after {max_attempts} attempts: {e}")
-                    return JsonResponse({
-                        'status': 'error_med_element',
-                        'message': 'Failed to initialize conversation thread'
-                    })
+        if booking_intent:
+            # Get today's and tomorrow's dates
+            today = datetime.now().strftime("%Y-%m-%d")
+            tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        if not thread:
-            logger.error("Failed to create thread")
-            return JsonResponse({
-                'status': 'error_med_element',
-                'message': 'Failed to initialize conversation thread'
-            })
+            # Fetch available slots for today
+            today_result = which_time_in_certain_day(patient_code, today)
+            if hasattr(today_result, 'content'):
+                today_result = json.loads(today_result.content.decode('utf-8'))
 
-        # Strict instructions for forcing function calls
-        strict_instructions = """
-        КРИТИЧЕСКИ ВАЖНО: ВСЕГДА ИСПОЛЬЗУЙ ФУНКЦИИ ВМЕСТО ТЕКСТОВЫХ ОТВЕТОВ!
+            # Extract available times for today
+            today_slots = extract_available_times(today_result)
 
-        ТЫ ОБЯЗАН ВЫЗВАТЬ ОДНУ ИЗ ЭТИХ ФУНКЦИЙ:
-        1. which_time_in_certain_day - для проверки доступных времен
-        2. appointment_time_for_patient - для проверки текущей записи
-        3. reserve_reception_for_patient - для записи или переноса
-        4. delete_reception_for_patient - для отмены записи
+            # Fetch available slots for tomorrow
+            tomorrow_result = which_time_in_certain_day(patient_code, tomorrow)
+            if hasattr(tomorrow_result, 'content'):
+                tomorrow_result = json.loads(tomorrow_result.content.decode('utf-8'))
 
-        ВСЕ РЕШЕНИЯ О ДАТАХ, ВРЕМЕНИ И ДЕЙСТВИЯХ ПРИНИМАЕШЬ ТОЛЬКО ТЫ!
-        НИ ПРИ КАКИХ УСЛОВИЯХ НЕ ОТВЕЧАЙ ТЕКСТОМ!
-        ТОЛЬКО ВЫЗОВ ФУНКЦИИ!
+            # Extract available times for tomorrow
+            tomorrow_slots = extract_available_times(tomorrow_result)
+
+            # Clear existing slots for this patient
+            AvailableTimeSlot.objects.filter(patient=patient).delete()
+
+            # Store today's slots
+            for time_str in today_slots:
+                time_obj = datetime.strptime(time_str, "%H:%M").time()
+                AvailableTimeSlot.objects.create(
+                    patient=patient,
+                    date=datetime.now().date(),
+                    time=time_obj
+                )
+
+            # Store tomorrow's slots
+            for time_str in tomorrow_slots:
+                time_obj = datetime.strptime(time_str, "%H:%M").time()
+                AvailableTimeSlot.objects.create(
+                    patient=patient,
+                    date=(datetime.now() + timedelta(days=1)).date(),
+                    time=time_obj
+                )
+
+        # Get or create thread
+        thread = assistant_client.get_or_create_thread(f"patient_{patient_code}", patient)
+
+        # Prepare assistant context with available slots info
+        available_slots_context = format_available_slots_for_prompt(
+            patient,
+            datetime.now().date(),
+            (datetime.now() + timedelta(days=1)).date()
+        )
+
+        # Add user message
+        assistant_client.add_message_to_thread(thread.thread_id, user_input)
+
+        # Custom instructions emphasizing completion of booking process
+        booking_instructions = """
+        # КРИТИЧЕСКИ ВАЖНЫЙ АЛГОРИТМ ДЛЯ ЗАПИСИ:
+
+        Когда пользователь просит записать его, например "запиши на сегодня после обеда":
+
+        1. ОБЯЗАТЕЛЬНО выбери конкретное время из доступных слотов в контексте
+        2. Для запроса "после обеда" выбирай время после 13:30
+        3. СРАЗУ ВЫЗЫВАЙ reserve_reception_for_patient с выбранным временем
+        4. НЕ ОСТАНАВЛИВАЙСЯ на этапе показа доступных времен
+
+        Пример запроса пациента: "{user_input}"
+
+        ДОСТУПНЫЕ СЛОТЫ:
+        {available_slots}
         """
 
-        # Attempt to add user message to thread
-        try:
-            assistant_client.add_message_to_thread(thread.thread_id, user_input)
-        except Exception as e:
-            logger.error(f"Failed to add message to thread: {e}")
-            # Create fallback response based on user request
-            return create_fallback_response(user_input, patient_code, appointment)
+        # Run assistant with enhanced instructions
+        instructions = booking_instructions.format(
+            user_input=user_input,
+            available_slots=available_slots_context
+        )
 
-        # Run assistant with strict instructions
-        try:
-            run = assistant_client.run_assistant(thread, appointment if appointment else patient,
-                                                 instructions=strict_instructions)
-        except Exception as e:
-            logger.error(f"Failed to run assistant: {e}")
-            return create_fallback_response(user_input, patient_code, appointment)
+        run = assistant_client.run_assistant(thread, patient, instructions=instructions)
 
-        # Wait for completion and check for function calls
-        try:
-            result = assistant_client.wait_for_run_completion(thread.thread_id, run.run_id, timeout=40)
+        # Wait for response
+        result = assistant_client.wait_for_run_completion(thread.thread_id, run.run_id)
 
-            # Check if we have a formatted function result
-            if isinstance(result, dict) and "status" in result:
-                logger.info(f"Returning function result with status: {result['status']}")
-                return JsonResponse(result)
-        except Exception as e:
-            logger.error(f"Error waiting for run completion: {e}")
-            # Continue execution and try other methods
+        # Return formatted result if available
+        if isinstance(result, dict) and "status" in result:
+            return JsonResponse(result)
 
-        # Direct function call based on text request (as fallback)
-        return create_fallback_response(user_input, patient_code, appointment)
+        # If no proper result, fallback to emergency processing
+        return create_fallback_response(user_input, patient_code)
 
-    except json.JSONDecodeError:
-        logger.error("Invalid JSON format in request")
-        return JsonResponse({
-            'status': 'bad_user_input',
-            'message': 'Invalid JSON format'
-        })
     except Exception as e:
         logger.error(f"Error processing request: {e}", exc_info=True)
-        return JsonResponse({
-            'status': 'error_med_element',
-            'message': f'Error processing request: {str(e)}'
-        })
+        return JsonResponse({'status': 'error_med_element', 'message': str(e)})
+
+
+def extract_available_times(result):
+    """Extract available times from which_time_in_certain_day result"""
+    times = []
+
+    # Check all possible time fields
+    if "all_available_times" in result and isinstance(result["all_available_times"], list):
+        times = result["all_available_times"]
+    elif "suggested_times" in result and isinstance(result["suggested_times"], list):
+        times = result["suggested_times"]
+    else:
+        # Check standard fields
+        for key in ["first_time", "second_time", "third_time"]:
+            if key in result and result[key]:
+                times.append(result[key])
+
+        # Check numeric fields
+        for i in range(1, 10):
+            key = f"time_{i}"
+            if key in result and result[key]:
+                times.append(result[key])
+
+    # Clean up time format
+    clean_times = []
+    for t in times:
+        if isinstance(t, str):
+            if " " in t:  # Format: "YYYY-MM-DD HH:MM"
+                clean_times.append(t.split(" ")[1])
+            else:
+                # Remove seconds if present
+                if t.count(":") == 2:  # Format: "HH:MM:SS"
+                    clean_times.append(":".join(t.split(":")[:2]))
+                else:
+                    clean_times.append(t)
+
+    return clean_times
 
 
 def create_fallback_response(user_input, patient_code):
@@ -972,76 +969,60 @@ def get_assistant_info(request):
 
 
 def format_available_slots_for_prompt(patient, today, tomorrow):
-    """
-    Форматирует доступные временные слоты для включения в промпт ассистента.
-
-    Args:
-        patient: Объект пациента
-        today: Сегодняшняя дата (объект datetime.date)
-        tomorrow: Завтрашняя дата (объект datetime.date)
-
-    Returns:
-        str: Отформатированная строка для включения в промпт
-    """
+    """Format available slots for assistant prompt"""
     from reminder.models import AvailableTimeSlot
 
-    # Получаем слоты на сегодня
+    # Get slots for today
     today_slots = AvailableTimeSlot.objects.filter(
         patient=patient,
         date=today
     ).order_by('time').values_list('time', flat=True)
 
-    # Получаем слоты на завтра
+    # Get slots for tomorrow
     tomorrow_slots = AvailableTimeSlot.objects.filter(
         patient=patient,
         date=tomorrow
     ).order_by('time').values_list('time', flat=True)
 
-    # Форматируем времена
+    # Format times
     today_times = [slot.strftime('%H:%M') for slot in today_slots]
     tomorrow_times = [slot.strftime('%H:%M') for slot in tomorrow_slots]
 
-    # Начинаем создавать текст для промпта
-    prompt_text = "\n# ДОСТУПНЫЕ ВРЕМЕННЫЕ СЛОТЫ ДЛЯ ЗАПИСИ\n\n"
+    # Create prompt text
+    prompt_text = "\n## ДОСТУПНЫЕ ВРЕМЕННЫЕ СЛОТЫ\n\n"
 
-    # Добавляем информацию о слотах на сегодня
-    prompt_text += f"## На сегодня ({today.strftime('%d.%m.%Y')}):\n"
+    # Add today's slots
+    prompt_text += f"### На сегодня ({today.strftime('%d.%m.%Y')}):\n"
     if today_times:
         prompt_text += ", ".join(today_times)
     else:
         prompt_text += "Нет доступных слотов"
     prompt_text += "\n\n"
 
-    # Добавляем информацию о слотах на завтра
-    prompt_text += f"## На завтра ({tomorrow.strftime('%d.%m.%Y')}):\n"
+    # Add tomorrow's slots
+    prompt_text += f"### На завтра ({tomorrow.strftime('%d.%m.%Y')}):\n"
     if tomorrow_times:
         prompt_text += ", ".join(tomorrow_times)
     else:
         prompt_text += "Нет доступных слотов"
     prompt_text += "\n\n"
 
-    # Добавляем инструкции по использованию слотов
+    # Add instructions for specific request types
     prompt_text += """
-## ОБЯЗАТЕЛЬНЫЙ АЛГОРИТМ ЗАПИСИ БЕЗ УКАЗАНИЯ КОНКРЕТНОГО ВРЕМЕНИ:
+    ## ПРАВИЛА ВЫБОРА ВРЕМЕНИ:
 
-1. Когда пациент просит "запишите меня на сегодня/завтра", но НЕ указывает конкретное время:
-   - ИСПОЛЬЗУЙ доступные временные слоты из списка выше
-   - ВЫБЕРИ первое доступное время из соответствующего списка
-   - ВЫЗОВИ функцию reserve_reception_for_patient с этим временем
-   - НЕ используй which_time_in_certain_day
+    1. "после обеда" или "днем" → выбирай время после 13:30
+    2. "утром" или "с утра" → выбирай время до 12:00
+    3. "вечером" → выбирай время после 16:00
 
-2. Если на запрашиваемую дату НЕТ доступных слотов:
-   - Сообщи пациенту об отсутствии свободных окон
-   - Предложи другую дату, на которую есть слоты
+    ## ВСЕГДА ЗАВЕРШАЙ ЗАПИСЬ:
 
-3. Примеры правильных действий:
-   Пациент: "Запишите меня на сегодня"
-   Действие: reserve_reception_for_patient с первым доступным временем из списка на сегодня
+    Когда пациент говорит "запиши", ОБЯЗАТЕЛЬНО:
+    1. Выбери конкретное подходящее время из доступных слотов
+    2. Вызови reserve_reception_for_patient с этим временем
+    3. НЕ останавливайся на этапе показа доступных времен
 
-   Пациент: "Запишите меня на завтра"
-   Действие: reserve_reception_for_patient с первым доступным временем из списка на завтра
-
-ВАЖНО: Этот алгоритм имеет НАИВЫСШИЙ приоритет для запросов без указания конкретного времени.
-"""
+    Например, на запрос "запиши на сегодня после обеда", выбери первое доступное время после 13:30 и сразу запиши.
+    """
 
     return prompt_text
