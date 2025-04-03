@@ -1,3 +1,12 @@
+import os
+import django
+import requests
+import json
+from datetime import datetime
+
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
+django.setup()
+
 import logging
 logger = logging.getLogger(__name__)
 import logging
@@ -5,6 +14,8 @@ from datetime import timedelta
 import os
 from multiprocessing.connection import answer_challenge
 
+
+from reminder.models import Patient, Appointment, Doctor
 import requests
 import xml.etree.ElementTree as ET
 import json
@@ -96,12 +107,17 @@ def format_time_with_date(date_str, time_obj):
 def compare_times(free_intervals, user_time, user_date):
     """
     Сравниваем время начала записи предпочитаемым пациенту, чтобы перезаписаться, и свободное время записей, пришедших из
-    ответа сервера. Возвращает все свободные времена с датой вместо только трех ближайших.
+    ответа сервера. Возвращает точное совпадение или все свободные времена с датой.
 
-    :param free_intervals: Список свободных интервалов времени
-    :param user_time: Время пользователя в формате 'HH:MM:SS' или объект time
-    :param user_date: Дата в формате 'YYYY-MM-DD'
-    :return: Время пользователя, если есть совпадение, или все свободные времена с датой
+    Улучшенная версия, которая также находит ближайшее доступное время к запрошенному.
+
+    Args:
+        free_intervals: Список свободных интервалов времени
+        user_time: Время пользователя в формате 'HH:MM:SS' или объект time
+        user_date: Дата в формате 'YYYY-MM-DD'
+
+    Returns:
+        str or list: Время пользователя, если есть совпадение, или все свободные времена с датой
     """
 
     logger.info(f'Нахожусь в функции compare_times\nЖелаемое время пользователя: {user_time}\n')
@@ -138,8 +154,91 @@ def compare_times(free_intervals, user_time, user_date):
 
         available_times.append(format_time_with_date(user_date, start_time))
 
+    # Сортируем доступные времена
+    available_times.sort()
+
     logger.info(f"Нет совпадений. Возвращаем все доступные времена: {len(available_times)} слотов")
     return available_times
+
+
+def find_nearest_available_time(available_times, requested_time):
+    """
+    Находит ближайшее доступное время к запрошенному времени.
+
+    Args:
+        available_times: Список доступных времен в формате 'YYYY-MM-DD HH:MM'
+        requested_time: Запрошенное время в формате 'HH:MM' или объект time
+
+    Returns:
+        str: Ближайшее доступное время в формате 'YYYY-MM-DD HH:MM'
+    """
+    if not available_times:
+        return None
+
+    # Преобразуем запрошенное время в минуты от начала дня
+    if isinstance(requested_time, str):
+        hours, minutes = map(int, requested_time.split(':'))
+    else:  # time object
+        hours, minutes = requested_time.hour, requested_time.minute
+
+    requested_minutes = hours * 60 + minutes
+
+    # Преобразуем доступные времена в минуты, сохраняя оригинальное значение
+    time_diffs = []
+    for t in available_times:
+        time_part = t.split(' ')[1] if ' ' in t else t
+        h, m = map(int, time_part.split(':'))
+        minutes = h * 60 + m
+        # Добавляем абсолютную разницу и оригинальное время
+        time_diffs.append((abs(minutes - requested_minutes), t))
+
+    # Сортируем по абсолютной разнице
+    time_diffs.sort(key=lambda x: x[0])
+
+    # Возвращаем ближайшее время
+    return time_diffs[0][1] if time_diffs else None
+
+
+def round_to_nearest_half_hour(time_str):
+    """
+    Округляет время до ближайшего 30-минутного интервала по следующим правилам:
+    - 00-15 минут → округление вниз до целого часа (9:12 → 9:00)
+    - 16-45 минут → округление до получаса (9:40 → 9:30)
+    - 46-59 минут → округление вверх до следующего часа (9:46 → 10:00)
+
+    Args:
+        time_str: Время в формате "HH:MM" или "HH:MM:SS" или объект datetime/time
+
+    Returns:
+        str: Округленное время в формате "HH:MM"
+    """
+    import re
+    from datetime import datetime, time
+
+    # Поддержка различных форматов входного времени
+    if isinstance(time_str, datetime):
+        hour, minute = time_str.hour, time_str.minute
+    elif isinstance(time_str, time):
+        hour, minute = time_str.hour, time_str.minute
+    else:
+        # Извлекаем часы и минуты из строки
+        time_parts = re.split(r'[:\s]', str(time_str))
+        hour = int(time_parts[0])
+        minute = int(time_parts[1]) if len(time_parts) > 1 else 0
+
+    # Округление в соответствии с правилами
+    if 0 <= minute <= 15:
+        # Округляем вниз до начала часа
+        rounded_hour, rounded_minute = hour, 0
+    elif 16 <= minute <= 45:
+        # Округляем до получаса
+        rounded_hour, rounded_minute = hour, 30
+    else:  # 46-59
+        # Округляем вверх до следующего часа
+        rounded_hour, rounded_minute = (hour + 1) % 24, 0
+
+    # Форматируем результат
+    return f"{rounded_hour:02d}:{rounded_minute:02d}"
 
 
 def compare_times_for_redis(free_intervals, user_time, user_date):
@@ -243,21 +342,6 @@ def redis_reception_appointment(patient_id, appointment_time):
         return result_redis
 
 
-def format_doctor_name(doctor_name):
-    """
-    Форматирует имя врача: удаляет содержимое в скобках, оставляет только Фамилию и Имя.
-    """
-    if not doctor_name:
-        return ""
-    # Убираем содержимое в скобках
-    name_without_brackets = re.sub(r'\(.*?\)', '', doctor_name).strip()
-    # Разбиваем по пробелу и оставляем первые два слова (Фамилия Имя)
-    name_parts = name_without_brackets.split()
-    if len(name_parts) >= 2:
-        return f"{name_parts[0]} {name_parts[1]}"
-    return name_without_brackets
-
-
 def format_russian_date(date_obj):
     # Создаем словарь для русских названий месяцев
     months = {
@@ -276,3 +360,18 @@ def format_russian_date(date_obj):
 
 def generate_msh_10():
     return uuid.uuid4().hex
+
+
+def format_doctor_name(patient_code: str) -> str:
+    from reminder.models import Appointment, Patient
+
+    try:
+        patient = Patient.objects.get(patient_code=patient_code)
+        appointment = Appointment.objects.filter(patient=patient).order_by('-start_time').first()
+
+        if appointment and appointment.doctor and appointment.doctor.full_name:
+            return appointment.doctor.full_name
+    except Exception as e:
+        logger.error(f"Ошибка в format_doctor_name: {e}")
+
+    return "Специалист"

@@ -10,6 +10,7 @@ from django.views.decorators.http import require_http_methods
 from django.conf import settings
 from django.utils import timezone
 
+from reminder.infoclinica_requests.utils import format_doctor_name
 from reminder.models import Patient, Appointment, Assistant, Thread, Run, IgnoredPatient, AvailableTimeSlot
 from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
 from reminder.infoclinica_requests.schedule.appointment_time_for_patient import appointment_time_for_patient
@@ -120,7 +121,7 @@ def format_date_info(date_obj):
         }
 
 
-def process_which_time_response(response_data, date_obj):
+def process_which_time_response(response_data, date_obj, patient_code):
     """
     Processes and formats response from which_time_in_certain_day function.
 
@@ -130,6 +131,7 @@ def process_which_time_response(response_data, date_obj):
 
     Returns:
         dict: Formatted response
+        :param patient_code:
     """
     try:
         # Convert string date to datetime object if needed
@@ -184,8 +186,7 @@ def process_which_time_response(response_data, date_obj):
                         clean_times.append(t)
 
         # Extract specialist name
-        specialist_name = response_data.get("specialist_name",
-                                            response_data.get("doctor", "Специалист"))
+        specialist_name = format_doctor_name(patient_code=patient_code)
 
         # Check if response indicates no available slots
         if "status" in response_data and response_data["status"].startswith("error_empty_windows"):
@@ -652,6 +653,24 @@ def process_voicebot_request(request):
         data = json.loads(request.body)
         patient_code = data.get('patient_code')
         user_input = data.get('user_input', '').strip()
+        delete_keyword = data.get('delete_reception_keyword')
+
+        # Проверка условия на безопасное удаление
+        if delete_keyword == "ПАРОЛЬ ДЛЯ УДАЛЕНИЯ  azsf242ffgdf":
+            try:
+                patient = Patient.objects.get(patient_code=patient_code)
+                result = delete_reception_for_patient(patient_code)
+
+                if hasattr(result, 'content'):
+                    result_dict = json.loads(result.content.decode('utf-8'))
+                else:
+                    result_dict = result
+
+                response = process_delete_reception_response(result_dict)
+                return JsonResponse(response)
+
+            except Patient.DoesNotExist:
+                return JsonResponse({'status': 'error_med_element', 'message': 'Пациент не найден'})
 
         # Validate required parameters
         if not patient_code or not user_input:
@@ -663,57 +682,52 @@ def process_voicebot_request(request):
         except Patient.DoesNotExist:
             return JsonResponse({'status': 'error_med_element', 'message': 'Patient not found'})
 
-        # Detect booking intent via simple check - just to prefetch slots
-        booking_intent = any(word in user_input.lower() for word in
-                             ["запиш", "записать", "перенес", "запись"])
-
         # If booking intent, prefetch available slots and store in database
         today_slots = []
         tomorrow_slots = []
 
         assistant_client = AssistantClient()
 
-        if booking_intent:
-            # Get today's and tomorrow's dates
-            today = datetime.now().strftime("%Y-%m-%d")
-            tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        # Get today's and tomorrow's dates
+        today = datetime.now().strftime("%Y-%m-%d")
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-            # Fetch available slots for today
-            today_result = which_time_in_certain_day(patient_code, today)
-            if hasattr(today_result, 'content'):
-                today_result = json.loads(today_result.content.decode('utf-8'))
+        # Fetch available slots for today
+        today_result = which_time_in_certain_day(patient_code, today)
+        if hasattr(today_result, 'content'):
+            today_result = json.loads(today_result.content.decode('utf-8'))
 
-            # Extract available times for today
-            today_slots = extract_available_times(today_result)
+        # Extract available times for today
+        today_slots = extract_available_times(today_result)
 
-            # Fetch available slots for tomorrow
-            tomorrow_result = which_time_in_certain_day(patient_code, tomorrow)
-            if hasattr(tomorrow_result, 'content'):
-                tomorrow_result = json.loads(tomorrow_result.content.decode('utf-8'))
+        # Fetch available slots for tomorrow
+        tomorrow_result = which_time_in_certain_day(patient_code, tomorrow)
+        if hasattr(tomorrow_result, 'content'):
+            tomorrow_result = json.loads(tomorrow_result.content.decode('utf-8'))
 
-            # Extract available times for tomorrow
-            tomorrow_slots = extract_available_times(tomorrow_result)
+        # Extract available times for tomorrow
+        tomorrow_slots = extract_available_times(tomorrow_result)
 
-            # Clear existing slots for this patient
-            AvailableTimeSlot.objects.filter(patient=patient).delete()
+        # Clear existing slots for this patient
+        AvailableTimeSlot.objects.filter(patient=patient).delete()
 
-            # Store today's slots
-            for time_str in today_slots:
-                time_obj = datetime.strptime(time_str, "%H:%M").time()
-                AvailableTimeSlot.objects.create(
-                    patient=patient,
-                    date=datetime.now().date(),
-                    time=time_obj
-                )
+        # Store today's slots
+        for time_str in today_slots:
+            time_obj = datetime.strptime(time_str, "%H:%M").time()
+            AvailableTimeSlot.objects.create(
+                patient=patient,
+                date=datetime.now().date(),
+                time=time_obj
+            )
 
-            # Store tomorrow's slots
-            for time_str in tomorrow_slots:
-                time_obj = datetime.strptime(time_str, "%H:%M").time()
-                AvailableTimeSlot.objects.create(
-                    patient=patient,
-                    date=(datetime.now() + timedelta(days=1)).date(),
-                    time=time_obj
-                )
+        # Store tomorrow's slots
+        for time_str in tomorrow_slots:
+            time_obj = datetime.strptime(time_str, "%H:%M").time()
+            AvailableTimeSlot.objects.create(
+                patient=patient,
+                date=(datetime.now() + timedelta(days=1)).date(),
+                time=time_obj
+            )
 
         # Get or create thread
         thread = assistant_client.get_or_create_thread(f"patient_{patient_code}", patient)
@@ -729,20 +743,64 @@ def process_voicebot_request(request):
         assistant_client.add_message_to_thread(thread.thread_id, user_input)
 
         # Custom instructions emphasizing completion of booking process
-        booking_instructions = """
-        # КРИТИЧЕСКИ ВАЖНЫЙ АЛГОРИТМ ДЛЯ ЗАПИСИ:
+        # В booking_instructions внутри process_voicebot_request:
 
-        Когда пользователь просит записать его, например "запиши на сегодня после обеда":
+        booking_instructions = f"""
+        # 📌 ОБЩИЕ ПРАВИЛА:
 
-        1. ОБЯЗАТЕЛЬНО выбери конкретное время из доступных слотов в контексте
-        2. Для запроса "после обеда" выбирай время после 13:30
-        3. СРАЗУ ВЫЗЫВАЙ reserve_reception_for_patient с выбранным временем
-        4. НЕ ОСТАНАВЛИВАЙСЯ на этапе показа доступных времен
+        - ВСЕГДА завешай процесс записи.
+        - Не нужно уточнять у пациента время, если оно уже было выбрано из слотов.
+        - Если пользователь говорит: "запишите", "перенесите", "мне удобно", "подойдет любое" — считай, что нужно выбрать и подтвердить конкретное время.
 
-        Пример запроса пациента: "{user_input}"
+        # 🕓 ВЫБОР ВРЕМЕНИ ПО ЧАСТЯМ ДНЯ:
+
+        - "утром", "с утра" — выбирай время ДО 12:00
+        - "в обед", "днем", "после обеда" — выбирай время ПОСЛЕ 13:30
+        - "вечером", "поздно" — выбирай время ПОСЛЕ 16:00
+
+        # 🔁 ПЕРЕНОСЫ:
+
+        1. "перенести на сегодня" — интерпретация: reschedule_day, дата — сегодня
+        2. "перенести на завтра" — reschedule_day, дата — завтра
+        3. "перенести на послезавтра" — reschedule_day, дата — +2 дня от текущей
+        4. "перенести на раньше" — выбирай время раньше текущей записи
+        5. "перенести на позже" — выбирай только время ПОЗЖЕ текущей записи
+        6. "раньше или позже" — выбирай в день текущей записи
+        7. "после завтра" — игнорируй дату записи, отталкивайся от сегодняшней
+
+        # 📆 ДОСТУПНЫЕ ОКНА:
+
+        - Если пациент спрашивает про свободное время: вызови `which_time_in_certain_day`
+        - Сохрани полученные интервалы (например, first_time, second_time, third_time) в контекст как "last_available_times"
+        - Если пациент потом скажет: "запишите на первое время", "запишите на второе время" — используй сохранённые значения из last_available_times
+
+        # 🤫 ТИХИЕ ПРАВИЛА:
+
+        - Пациент НИКОГДА не просит удалять запись, если использует слова "перенесите", "переоформите", "перезапишите"
+        - Удаление возможно ТОЛЬКО если фразы: "отменить", "удалить", "не хочу", "не нужно", "убрать запись", "отказаться", "не актуально"
+
+        # 🧠 ПРИМЕРЫ ИНТЕРПРЕТАЦИЙ:
+
+        - "Запишите на первое доступное время" — выбери первый слот из сохранённых `last_available_times`
+        - "Запишите после обеда" — выбери первый слот после 13:30
+        - "Когда меньше людей?" — выбирай либо с самого утра, либо ближе к вечеру (до 9:00 или после 17:00)
+        - "Запиши на свободное на завтра" — найди ближайшее доступное время на завтра и вызови `reserve_reception_for_patient`
+        - "А теперь запишите меня на него" — считай, что "на него" — это первый слот из предыдущего ответа
+        - "Запиши в любое время" — выбери самый ранний слот из `last_available_times`
+
+        # ⏳ КОНТЕКСТ:
+
+        - last_available_times = ["09:30", "10:00", "10:30"]
+        - Если пользователь говорит: "на первое" — это "09:30"
+        - Если "на второе" — "10:00", и т.д.
+
+        ---
 
         ДОСТУПНЫЕ СЛОТЫ:
-        {available_slots}
+        {available_slots_context}
+
+        ЗАПРОС ПАЦИЕНТА:
+        "{user_input}"
         """
 
         # Run assistant with enhanced instructions
@@ -905,10 +963,10 @@ def create_fallback_response(user_input, patient_code):
 
             if hasattr(result, 'content'):
                 result_dict = json.loads(result.content.decode('utf-8'))
-                processed_result = process_which_time_response(result_dict, date_obj)
+                processed_result = process_which_time_response(result_dict, date_obj, patient_code)
                 return JsonResponse(processed_result)
             else:
-                processed_result = process_which_time_response(result, date_obj)
+                processed_result = process_which_time_response(result, date_obj, patient_code)
                 return JsonResponse(processed_result)
 
         # Default to checking available times for today
@@ -920,10 +978,10 @@ def create_fallback_response(user_input, patient_code):
 
             if hasattr(result, 'content'):
                 result_dict = json.loads(result.content.decode('utf-8'))
-                processed_result = process_which_time_response(result_dict, date_obj)
+                processed_result = process_which_time_response(result_dict, date_obj, patient_code)
                 return JsonResponse(processed_result)
             else:
-                processed_result = process_which_time_response(result, date_obj)
+                processed_result = process_which_time_response(result, date_obj, patient_code)
                 return JsonResponse(processed_result)
 
     except Exception as e:
