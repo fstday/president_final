@@ -116,12 +116,12 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
                         'message': 'No doctor code found for this patient'
                     }
 
-                # В блоке определения филиала
-                if latest_queue and latest_queue.target_branch:
-                    target_branch_id = latest_queue.target_branch.clinic_id
-                    logger.info(f"Target clinic ID from queue: {target_branch_id}")
+                if latest_queue.branch:
+                    target_filial_id = latest_queue.branch.clinic_id
+                    print(f"Target clinic ID from queue: {target_filial_id}")
                 else:
-                    target_branch_id = 1  # Default value
+                    target_filial_id = 1  # Default value
+                    print(f"Using default target clinic ID: {target_filial_id}")
             else:
                 print("⚠️ No appointments or queue entries found for this patient")
                 return {
@@ -340,45 +340,4 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
         }
 
 
-def round_to_nearest_half_hour(time_str):
-    """
-    Округляет время до ближайшего 30-минутного интервала по следующим правилам:
-    - 00-15 минут → округление вниз до целого часа (9:12 → 9:00)
-    - 16-45 минут → округление до получаса (9:40 → 9:30)
-    - 46-59 минут → округление вверх до следующего часа (9:46 → 10:00)
-
-    Args:
-        time_str: Время в формате "HH:MM" или "HH:MM:SS"
-
-    Returns:
-        str: Округленное время в формате "HH:MM"
-    """
-    import re
-    from datetime import datetime, timedelta
-
-    # Поддержка различных форматов входного времени
-    if isinstance(time_str, datetime):
-        hour, minute = time_str.hour, time_str.minute
-    else:
-        # Извлекаем часы и минуты из строки
-        time_parts = re.split(r'[:\s]', str(time_str))
-        hour = int(time_parts[0])
-        minute = int(time_parts[1]) if len(time_parts) > 1 else 0
-
-    # Округление в соответствии с правилами
-    if 0 <= minute <= 15:
-        # Округляем вниз до начала часа
-        rounded_hour, rounded_minute = hour, 0
-    elif 16 <= minute <= 45:
-        # Округляем до получаса
-        rounded_hour, rounded_minute = hour, 30
-    else:  # 46-59
-        # Округляем вверх до следующего часа
-        rounded_hour, rounded_minute = (hour + 1) % 24, 0
-
-    # Форматируем результат
-    return f"{rounded_hour:02d}:{rounded_minute:02d}"
-
-
-if __name__ == '__main__':
-    print(reserve_reception_for_patient('990000735', date_from_patient='2025-04-03 11:30', trigger_id=2))
+reserve_reception_for_patient('990000735', date_from_patient='2025-04-01 14:00:00', trigger_id=1)

@@ -803,8 +803,13 @@ class AssistantClient:
                 return result
 
             elif function_name == "reserve_reception_for_patient":
-                patient_id = function_args.get("patient_id")
+
+                # Проверяем оба возможных имени параметра
+
+                patient_id = function_args.get("patient_id") or function_args.get("id")
+
                 date_from_patient = function_args.get("date_from_patient")
+
                 trigger_id = function_args.get("trigger_id", 1)
 
                 # Process date_from_patient
