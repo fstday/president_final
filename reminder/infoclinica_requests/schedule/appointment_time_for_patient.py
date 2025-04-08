@@ -1,6 +1,8 @@
 import os
 import django
 
+from reminder.infoclinica_requests.utils import format_doctor_name
+
 # Настройка окружения
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
 django.setup()
@@ -157,13 +159,14 @@ def appointment_time_for_patient(patient_code, year_from_patient_for_returning=N
                         # Обрабатываем входное время
                         appointment_time_parts = str(year_from_patient_for_returning).split('+')
                         appointment_time_modified_final = appointment_time_parts[0]
+                        specialist_name = format_doctor_name(patient_code)
 
                         return {
                             'status': 'success_appointment',
                             'appointment_id': appointment_id,
                             'appointment_time': appointment_time,
                             'appointment_date': formatted_date,
-                            'doctor_name': doctor_name,
+                            'doctor_name': specialist_name,
                             'clinic_name': clinic_name,
                             'message': f'Запись пациента назначена на {appointment_time}'
                         }

@@ -3,7 +3,8 @@ import logging
 import calendar
 from datetime import datetime, timezone, timedelta, time
 from typing import Dict, Any, List, Optional, Tuple
-
+from dotenv import load_dotenv
+import os
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -649,11 +650,21 @@ def process_appointment_time_response(response_data):
 @require_http_methods(["POST"])
 def process_voicebot_request(request):
     try:
+        auth_token = request.headers.get("Authorization-Token")
+        expected_token = os.getenv("VOICEBOT_AUTH_TOKEN")
+
+        if auth_token != expected_token:
+            return JsonResponse({
+                "status": "unauthorized",
+                "message": "Неверный токен авторизации"
+            }, status=401)
+
         # Parse request data
         data = json.loads(request.body)
         patient_code = data.get('patient_code')
         user_input = data.get('user_input', '').strip()
         delete_keyword = data.get('delete_reception_keyword')
+
 
         # Проверка условия на безопасное удаление
         if delete_keyword == "ПАРОЛЬ ДЛЯ УДАЛЕНИЯ  azsf242ffgdf":

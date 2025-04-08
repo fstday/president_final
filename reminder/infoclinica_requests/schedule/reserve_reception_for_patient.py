@@ -7,7 +7,7 @@ django.setup()
 from dotenv import load_dotenv
 
 from reminder.infoclinica_requests.schedule.schedule_rec_reserve import schedule_rec_reserve
-from reminder.infoclinica_requests.utils import compare_times_for_redis, compare_times
+from reminder.infoclinica_requests.utils import compare_times_for_redis, compare_times, format_doctor_name
 
 load_dotenv()
 
@@ -245,10 +245,11 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
                     'status': 'suggest_times',
                     'suggested_times': result_times,
                     'message': f'Данное время {date_from_patient} было занято. Возвращаем все свободные времена',
-                    'action': 'reserve'
+                    'action': 'reserve',
+                    'specialist_name': format_doctor_name(patient_id)
                 }
-                logger.info(answer)
 
+                logger.info(answer)
                 return answer
 
             # Обработка для trigger_id == 1
@@ -280,7 +281,8 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
                             'status': 'suggest_times',
                             'suggested_times': result_time,
                             'message': f'Данное время {date_from_patient} было занято. Возвращаем все свободные времена',
-                            'action': 'reserve'
+                            'action': 'reserve',
+                            'specialist_name': format_doctor_name(patient_id)
                         }
 
                         logger.info(answer)
