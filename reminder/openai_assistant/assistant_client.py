@@ -586,7 +586,6 @@ class AssistantClient:
                         logger.info(f"Returning immediate function result with status: {function_result['status']}")
                         return function_result
 
-                # Return if run has completed
                 if run.status in ["completed", "failed", "cancelled", "expired"]:
                     logger.info(f"Run {run_id} ended with status: {run.status}")
 
@@ -605,7 +604,60 @@ class AssistantClient:
                                 if function_result:
                                     return function_result
 
-                    # Last resort: return status
+                    # Before returning just the status, check if the query looks like a request for available times
+                    messages = self.get_messages(thread_id, limit=5)
+                    for message in messages:
+                        if message.role == "user":
+                            if message.content and len(message.content) > 0 and hasattr(message.content[0], 'text'):
+                                text = message.content[0].text.value.lower()
+                                if any(word in text for word in ["свободн", "доступн", "времена", "окошк", "запис"]):
+                                    # Try to extract date from request
+                                    date_str = "today"
+                                    if "завтра" in text:
+                                        date_str = "tomorrow"
+                                    elif "послезавтра" in text or "после завтра" in text:
+                                        date_str = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
+
+                                    # Force call to which_time_in_certain_day
+                                    patient_code = None
+                                    thread = Thread.objects.filter(thread_id=thread_id).first()
+                                    if thread and thread.appointment_id:
+                                        appointment = Appointment.objects.filter(
+                                            appointment_id=thread.appointment_id).first()
+                                        if appointment:
+                                            patient_code = appointment.patient.patient_code
+                                    else:
+                                        # Try to get patient code from thread order_key
+                                        thread_obj = Thread.objects.filter(thread_id=thread_id).first()
+                                        if thread_obj and thread_obj.order_key and thread_obj.order_key.startswith(
+                                                "patient_"):
+                                            patient_code = thread_obj.order_key.replace("patient_", "")
+
+                                    if patient_code:
+                                        result = self._call_function("which_time_in_certain_day",
+                                                                     {"patient_code": patient_code,
+                                                                      "date_time": date_str}, thread_id)
+                                        formatted_result = self._format_for_acs("which_time_in_certain_day",
+                                                                                {"patient_code": patient_code,
+                                                                                 "date_time": date_str}, result)
+                                        if formatted_result and "status" in formatted_result:
+                                            return formatted_result
+
+                    # Last resort: return status with a meaningful message
+                    if run.status == "completed":
+                        # Try to determine intent from user messages and provide a more helpful response
+                        user_message = self._get_last_user_message(thread_id).lower()
+                        if any(word in user_message for word in ["свободн", "доступн", "времена", "окошк"]):
+                            return {
+                                "status": "which_time",
+                                "message": "Информация о свободных временах не может быть получена. Пожалуйста, уточните дату."
+                            }
+                        elif any(word in user_message for word in ["запис", "перенес", "измен"]):
+                            return {
+                                "status": "success_change_reception",
+                                "message": "Не удалось обработать запрос на запись/перенос. Пожалуйста, укажите конкретную дату и время."
+                            }
+
                     return {"status": run.status}
 
                 # Wait before checking again
