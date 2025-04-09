@@ -135,6 +135,10 @@ def process_which_time_response(response_data, date_obj, patient_code):
         :param patient_code:
     """
     try:
+
+        specialist_name = response_data.get("specialist_name",
+                                            response_data.get("doctor", format_doctor_name(patient_code)))
+
         # Convert string date to datetime object if needed
         if isinstance(date_obj, str):
             try:
@@ -185,9 +189,6 @@ def process_which_time_response(response_data, date_obj, patient_code):
                         clean_times.append(":".join(t.split(":")[:2]))
                     else:
                         clean_times.append(t)
-
-        # Extract specialist name
-        specialist_name = format_doctor_name(patient_code=patient_code)
 
         # Check if response indicates no available slots
         if "status" in response_data and response_data["status"].startswith("error_empty_windows"):
@@ -582,6 +583,7 @@ def process_appointment_time_response(response_data):
     try:
         # Check if response already has a proper status
         status = response_data.get("status", "")
+        specialist_name = response_data.get("specialist_name", response_data.get("doctor_name", "Специалист"))
 
         # If successful appointment info
         if status in ["success_appointment", "success_appointment_from_db"]:
@@ -613,7 +615,7 @@ def process_appointment_time_response(response_data):
                     "status": "success_for_check_info",
                     "date": date_info["date"],
                     "date_kz": date_info["date_kz"],
-                    "specialist_name": response_data.get("doctor_name", "Специалист"),
+                    "specialist_name": specialist_name,
                     "weekday": date_info["weekday"],
                     "weekday_kz": date_info["weekday_kz"],
                     "time": response_data["appointment_time"]
@@ -766,8 +768,9 @@ def process_voicebot_request(request):
         # 🕓 ВЫБОР ВРЕМЕНИ ПО ЧАСТЯМ ДНЯ:
 
         - "утром", "с утра" — выбирай время ДО 12:00
-        - "в обед", "днем", "после обеда" — выбирай время ПОСЛЕ 13:30
-        - "вечером", "поздно" — выбирай время ПОСЛЕ 16:00
+        - "в обед", "днем" — выбирай время ПОСЛЕ 13:30
+        - "после обеда" - выбирай время после 14:00
+        - "вечером", "поздно" — выбирай время ПОСЛЕ 17:00
 
         # 🔁 ПЕРЕНОСЫ:
 

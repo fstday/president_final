@@ -277,10 +277,11 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                         redis_reception_appointment(patient_id=patient_id, appointment_time=appointment_time_str)
 
                         return {
-                            'status': 'success_schedule',
-                            'message': f'Запись произведена успешно на {appointment_time_str}',
-                            'time': appointment_time_str
-                        }
+                             'status': 'success_schedule',
+                             'message': f'Запись произведена успешно на {appointment_time_str}',
+                             'time': appointment_time_str,
+                             'specialist_name': doctor.full_name if doctor else "Специалист"
+                         }
 
                     if sp_result == 0:
                         logger.info('К сожалению, выбранное время было недавно занято.')
@@ -292,7 +293,8 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                             'status': 'suggest_times',
                             'suggested_times': available_times,
                             'message': f'Время приема {result_time} занято. Возвращаю все свободные времена для записи',
-                            'action': 'reserve'
+                            'action': 'reserve',
+                            'specialist_name': doctor.full_name if doctor else "Специалист"
                         }
 
                         logger.info(f"Возвращаю из schedule_rec_reserve: {answer}")

@@ -93,7 +93,7 @@ def which_time_in_certain_day(patient_code, date_time):
         logger.warning(f"⚠ КРИТИЧЕСКАЯ ОШИБКА: TOFILIAL не найден для пациента {patient_code}!")
         logger.warning("⚠ Используем значение по умолчанию 1, но это может привести к ошибкам!")
 
-    formatted_doc_name_final = format_doctor_name(doctor_name)
+    formatted_doc_name_final = doctor_name if doctor_name else format_doctor_name(patient_code)
 
     # Определяем текущую дату и завтрашний день
     current_datetime = datetime.now(pytz.timezone("Europe/Moscow"))
@@ -225,7 +225,8 @@ def which_time_in_certain_day(patient_code, date_time):
                 'time_1': None,
                 'time_2': None,
                 'time_3': None,
-                'day': day_for_return
+                'day': day_for_return,
+                'specialist_name': formatted_doc_name_final
             })
 
         # Формирование ответа
@@ -258,6 +259,7 @@ def which_time_in_certain_day(patient_code, date_time):
             'all_available_times': all_available_times,
             'date': formatted_date,
             'doctor': formatted_doc_name_final,
+            'specialist_name': formatted_doc_name_final,
             'weekday': weekday,
             'day': day_for_return
         }

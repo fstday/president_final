@@ -166,7 +166,8 @@ def appointment_time_for_patient(patient_code, year_from_patient_for_returning=N
                             'appointment_id': appointment_id,
                             'appointment_time': appointment_time,
                             'appointment_date': formatted_date,
-                            'doctor_name': specialist_name,
+                            'doctor_name': specialist_name,  # Keep this for backward compatibility
+                            'specialist_name': specialist_name,  # Add this field
                             'clinic_name': clinic_name,
                             'message': f'Запись пациента назначена на {appointment_time}'
                         }

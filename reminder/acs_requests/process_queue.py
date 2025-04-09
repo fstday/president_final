@@ -144,12 +144,12 @@ def process_queue_to_acs():
 
         # Формирование данных в нужном формате
         json_data = {
-            "phone": "77070699414",
+            "phone": phone,
             "full_name": str(patient.get_full_name() or ""),
             "info": {
                 "time": appointment_time,
                 "reception_id": appointment_id,
-                "patient_code": "990000735",
+                "patient_code": patient.patient_code,
                 "day": "сегодня" if relation == "today" else "завтра" if relation == "tomorrow" else "",
                 "day_kz": "бүгін" if relation == "today" else "ертең" if relation == "tomorrow" else "",
                 "weekday": weekday,
