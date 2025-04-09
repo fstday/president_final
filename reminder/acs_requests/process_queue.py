@@ -10,7 +10,7 @@ import requests
 import json
 from django.utils.timezone import now
 from reminder.properties.utils import ACS_BASE_URL, get_latest_api_key, get_formatted_date_info
-from reminder.models import Appointment, Call, QueueInfo, Patient
+from reminder.models import Appointment, Call, QueueInfo, Patient, Doctor
 
 
 def process_queue_to_acs():
@@ -74,6 +74,51 @@ def process_queue_to_acs():
         date_kz = ""
         relation = None
 
+        # 1. Сначала проверяем, есть ли информация о враче в самой записи очереди
+        if queue_entry.doctor_code and queue_entry.doctor_name:
+            doctor_code = queue_entry.doctor_code
+            doctor_name = queue_entry.doctor_name
+            print(f"✅ Использую информацию о враче из записи очереди: {doctor_name}")
+
+            # Пробуем получить дополнительную информацию о враче из модели Doctor
+            try:
+                doctor = Doctor.objects.filter(doctor_code=doctor_code).first()
+                if doctor and doctor.specialization_id:
+                    specialization_id = doctor.specialization_id
+                    print(f"✅ Добавлена информация о специализации из модели Doctor")
+            except Exception as e:
+                print(f"⚠ Не удалось получить дополнительную информацию о враче: {e}")
+
+        # 2. Если в queue_entry нет информации о враче, пробуем найти подходящего врача для данного пациента
+        else:
+            try:
+                # Можно попробовать найти последнего врача, с которым взаимодействовал пациент
+                recent_appointment = Appointment.objects.filter(
+                    patient=patient,
+                    doctor__isnull=False,
+                    is_active=True
+                ).order_by('-start_time').first()
+
+                if recent_appointment and recent_appointment.doctor:
+                    doctor_name = str(recent_appointment.doctor.full_name)
+                    doctor_code = recent_appointment.doctor.doctor_code
+                    specialization_id = recent_appointment.doctor.specialization_id
+                    print(f"✅ Использую информацию о враче из предыдущего приема: {doctor_name}")
+            except Exception as e:
+                print(f"⚠ Не удалось найти информацию о предыдущем враче: {e}")
+
+        # 3. Получаем информацию о клинике
+        if queue_entry.target_branch:
+            clinic_name = str(queue_entry.target_branch.name)
+            clinic_address = str(queue_entry.target_branch.address or "")
+            print(f"✅ Использую информацию о клинике из target_branch: {clinic_name}")
+
+        # 4. Получаем информацию об отделении, если она есть в queue_entry
+        if queue_entry.department_name:
+            department_name = str(queue_entry.department_name)
+            print(f"✅ Использую информацию об отделении из записи очереди: {department_name}")
+
+        # 5. Если у пациента есть активная запись на прием, используем ее данные для дополнительной информации
         try:
             # Поиск связанного приема
             appointment = Appointment.objects.filter(
@@ -83,10 +128,22 @@ def process_queue_to_acs():
             ).order_by('start_time').first()
 
             if appointment:
-                doctor_name = str(appointment.doctor.full_name) if appointment.doctor else "Не назначен"
-                clinic_name = str(appointment.clinic.name) if appointment.clinic else ""
-                clinic_address = str(appointment.clinic.address) if appointment.clinic else ""
-                department_name = str(appointment.department.name) if appointment.department else ""
+                print("✅ Найдена активная запись на прием, добавляю информацию")
+
+                # Если у нас еще нет информации о враче, берем из приема
+                if doctor_name == "Не назначен" and appointment.doctor:
+                    doctor_name = str(appointment.doctor.full_name)
+                    doctor_code = appointment.doctor.doctor_code
+                    specialization_id = appointment.doctor.specialization_id
+
+                # Если у нас еще нет информации о клинике, берем из приема
+                if not clinic_name and appointment.clinic:
+                    clinic_name = str(appointment.clinic.name)
+                    clinic_address = str(appointment.clinic.address or "")
+
+                # Если у нас еще нет информации об отделении, берем из приема
+                if not department_name and appointment.department:
+                    department_name = str(appointment.department.name)
 
                 # Преобразование времени приема в нужный формат
                 reception_start_time = appointment.start_time
@@ -107,11 +164,6 @@ def process_queue_to_acs():
                 appointment_time = reception_start_time.strftime("%H:%M")
                 appointment_id = appointment.appointment_id
                 reception_time_for_api = reception_start_time.strftime('%Y-%m-%d %H:%M')
-
-                # Получаем код доктора и специализацию
-                if appointment.doctor:
-                    doctor_code = appointment.doctor.doctor_code
-                    specialization_id = appointment.doctor.specialization_id
 
                 # Получаем дополнительные данные
                 cabinet_number = appointment.cabinet_number
@@ -136,9 +188,6 @@ def process_queue_to_acs():
                 date = reception_day_data.get("date", "")
                 date_kz = reception_day_data.get("date_kz", "")
 
-            elif queue_entry.target_branch:
-                clinic_name = str(queue_entry.target_branch.name)
-                clinic_address = str(queue_entry.target_branch.address or "")
         except Exception as e:
             print(f"⚠ Ошибка при получении данных о приеме: {e}")
 
@@ -158,12 +207,11 @@ def process_queue_to_acs():
                 "specialization_id": specialization_id,
                 "specialist_name": doctor_name,
                 "clinic_id": queue_entry.target_branch.clinic_id if queue_entry.target_branch else None,
-                "cabinet_number": cabinet_number,
-                "service_id": service_id,
                 "past_reception_start_time": reception_time_for_api if 'reception_time_for_api' in locals() else "",
                 "original_time": appointment_time,
                 "original_date": date,
                 "original_date_kz": date_kz,
+                "gp": str(queue_reason_code or ""),
             }
         }
 
@@ -184,7 +232,6 @@ def process_queue_to_acs():
 
             if response.status_code == 200:
                 # Обработка успешного ответа и сохранение данных в БД
-                # ... (остальной код обработки ответа остается без изменений)
                 try:
                     result_data = response.json()
                     print(f"Структура ответа: {type(result_data).__name__}")
@@ -210,7 +257,6 @@ def process_queue_to_acs():
 
                     if order_key:
                         # Сохранение данных в БД
-                        # ... (остальной код работы с БД остается без изменений)
                         try:
                             # Создание или обновление записи звонка
                             if appointment:

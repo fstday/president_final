@@ -72,7 +72,6 @@ def queue_info():
                 </MSH.9>
                 <MSH.10>{msh_10}</MSH.10>
                 <MSH.18>UTF-8</MSH.18>
-                <MSH.99>1</MSH.99>
               </MSH>
               <QUEUE_INFO_IN>
                 <QUEUEID>{queue_id}</QUEUEID>
