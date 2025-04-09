@@ -134,3 +134,152 @@ def handle_booking_request_without_time(patient_code, date_str, date_obj=None):
             processed_result["status"] = "which_time"
 
     return processed_result
+
+
+def check_if_time_selection_request(user_input, today_slots, tomorrow_slots):
+    """
+    Checks if user input is a request to select a time from previously displayed times.
+
+    Args:
+        user_input: User's input text
+        today_slots: List of available time slots for today
+        tomorrow_slots: List of available time slots for tomorrow
+
+    Returns:
+        bool: True if the request is for time selection, False otherwise
+    """
+    # Convert user input to lowercase for easier comparison
+    user_input_lower = user_input.lower()
+
+    # If there are no available slots, it can't be a time selection request
+    if not today_slots and not tomorrow_slots:
+        return False
+
+    # Check for common time selection phrases
+    selection_phrases = [
+        "первое время", "первый вариант", "на первое", "первое",
+        "второе время", "второй вариант", "на второе", "второе",
+        "третье время", "третий вариант", "на третье", "третье",
+        "последнее время", "последний вариант", "на последнее", "последнее",
+        "самое раннее", "раннее", "самое позднее", "позднее",
+        "номер один", "номер два", "номер три",
+        "вариант один", "вариант два", "вариант три",
+        "первый", "второй", "третий"
+    ]
+
+    # Check for simple agreement phrases after showing times
+    agreement_phrases = [
+        "да", "хорошо", "ок", "подойдет", "согласен",
+        "записывайте", "можно", "запишите", "давайте"
+    ]
+
+    # Check for selection phrases
+    for phrase in selection_phrases:
+        if phrase in user_input_lower:
+            return True
+
+    # Check for standalone agreement (only if we have slots)
+    if any(word == user_input_lower for word in agreement_phrases):
+        return True
+
+    # Check for time phrases with "запишите", "запись", etc.
+    booking_keywords = ["запиш", "запись", "записать", "бронир", "возьми"]
+    for keyword in booking_keywords:
+        if keyword in user_input_lower:
+            # Check if any time is mentioned in the request
+            for time_slot in today_slots + tomorrow_slots:
+                if time_slot in user_input:
+                    return True
+
+    return False
+
+
+def get_selected_time_slot(user_input, today_slots, tomorrow_slots):
+    """
+    Determines which time slot the user is trying to select based on their input.
+
+    Args:
+        user_input: User's input text
+        today_slots: List of available time slots for today
+        tomorrow_slots: List of available time slots for tomorrow
+
+    Returns:
+        tuple: (date_obj, time_str) selected by the user, or (None, None) if unable to determine
+    """
+    user_input_lower = user_input.lower()
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+
+    # Default to today unless specifically mentioned tomorrow
+    target_date = today
+    target_slots = today_slots
+
+    # Check if we should use tomorrow's slots
+    if "завтра" in user_input_lower:
+        target_date = tomorrow
+        target_slots = tomorrow_slots
+
+    # If no slots available for target date, check the other day
+    if not target_slots:
+        if target_date == today and tomorrow_slots:
+            target_date = tomorrow
+            target_slots = tomorrow_slots
+        elif target_date == tomorrow and today_slots:
+            target_date = today
+            target_slots = today_slots
+        else:
+            # No slots available for either day
+            return None, None
+
+    # Check for specific time selection patterns
+
+    # 1. Ordinal selection (first, second, third)
+    if any(phrase in user_input_lower for phrase in ["первое", "первый", "номер один", "вариант один"]):
+        if target_slots and len(target_slots) >= 1:
+            return target_date, target_slots[0]
+
+    elif any(phrase in user_input_lower for phrase in ["второе", "второй", "номер два", "вариант два"]):
+        if target_slots and len(target_slots) >= 2:
+            return target_date, target_slots[1]
+
+    elif any(phrase in user_input_lower for phrase in ["третье", "третий", "номер три", "вариант три"]):
+        if target_slots and len(target_slots) >= 3:
+            return target_date, target_slots[2]
+
+    # 2. Relative position selection
+    elif any(phrase in user_input_lower for phrase in ["последнее", "последний", "позднее", "самое позднее"]):
+        if target_slots:
+            return target_date, target_slots[-1]
+
+    elif any(phrase in user_input_lower for phrase in ["раннее", "самое раннее", "пораньше"]):
+        if target_slots:
+            return target_date, target_slots[0]
+
+    # 3. Simple agreement (use first option by default)
+    elif any(word == user_input_lower for word in
+             ["да", "хорошо", "ок", "подойдет", "согласен", "записывайте", "можно"]):
+        if target_slots:
+            return target_date, target_slots[0]
+
+    # 4. Direct time mention
+    for time_slot in target_slots:
+        if time_slot in user_input:
+            return target_date, time_slot
+
+    # 5. Approximate time mention
+    time_period_map = {
+        "утр": [slot for slot in target_slots if slot < "12:00"],
+        "обед": [slot for slot in target_slots if "12:00" <= slot <= "14:00"],
+        "вечер": [slot for slot in target_slots if slot >= "16:00"]
+    }
+
+    for period, slots in time_period_map.items():
+        if period in user_input_lower and slots:
+            return target_date, slots[0]
+
+    # If all else fails but we have context that this is a selection request,
+    # default to the first available slot
+    if target_slots:
+        return target_date, target_slots[0]
+
+    return None, None

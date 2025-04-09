@@ -377,117 +377,36 @@ class AssistantClient:
             }
             current_weekday = weekdays_ru[current_moscow_datetime.weekday()]
 
-            # Use provided instructions or create default
-            if not instructions:
-                instructions = """
+            # Don't attempt to format instructions - just use them as is
+            full_instructions = ""
+
+            if instructions:
+                # Simply use the provided instructions without any formatting
+                full_instructions = instructions
+            else:
+                # Use default instructions without using format()
+                full_instructions = """
                 # КРИТИЧЕСКИ ВАЖНО: ВСЕГДА ИСПОЛЬЗУЙ ФУНКЦИИ, А НЕ ТЕКСТОВЫЕ ОТВЕТЫ!
 
                 В следующих ситуациях ты ОБЯЗАТЕЛЬНО должен вызвать функцию вместо текстового ответа:
 
                 1. Когда пользователь спрашивает о свободных окошках или времени:
-                   → ВСЕГДА вызывай функцию which_time_in_certain_day с параметрами:
-                      - patient_code: "{patient_code}"
-                      - date_time: "today" или "tomorrow" или конкретная дата в формате YYYY-MM-DD
+                   → ВСЕГДА вызывай функцию which_time_in_certain_day
 
                 2. Когда пользователь интересуется своей текущей записью:
-                   → ВСЕГДА вызывай функцию appointment_time_for_patient с параметрами:
-                      - patient_code: "{patient_code}"
+                   → ВСЕГДА вызывай функцию appointment_time_for_patient
 
                 3. Когда пользователь хочет записаться или перенести запись:
-                   → ВСЕГДА вызывай функцию reserve_reception_for_patient с параметрами:
-                      - patient_id: "{patient_code}"
-                      - date_from_patient: конкретная дата и время в формате "YYYY-MM-DD HH:MM"
-                      - trigger_id: 1 для записи, 2 для поиска ближайших свободных времен
+                   → ВСЕГДА вызывай функцию reserve_reception_for_patient
 
                 4. Когда пользователь хочет отменить запись:
-                   → ВСЕГДА вызывай функцию delete_reception_for_patient с параметрами:
-                      - patient_id: "{patient_code}"
+                   → ВСЕГДА вызывай функцию delete_reception_for_patient
 
                 # ЗАПРЕЩЕНО использовать текстовые ответы для вышеперечисленных запросов!
                 # ВСЕГДА вызывай соответствующую функцию!
                 """
 
-            instructions = instructions.format(
-                patient_code=patient_code,
-                today=today,
-                tomorrow=tomorrow
-            )
-
-            # Add info about the patient and appointment
-            patient_info = f"""
-            # ВАЖНАЯ ИНФОРМАЦИЯ О ПАЦИЕНТЕ:
-
-            - Текущий пациент: {patient.full_name} (ID: {patient_code})
-            """
-
-            if appointment:
-                patient_info += f"""
-                - Запись: ID {appointment.appointment_id}, назначена на {appointment_time}
-                - Врач: {doctor_name}
-                - Клиника: {clinic_name}
-                """
-            else:
-                patient_info += """
-                - У пациента нет активной записи на прием
-                """
-
-            # Add current date and time context
-            datetime_context = f"""
-            # ТЕКУЩАЯ ДАТА И ВРЕМЯ (Москва):
-
-            - Текущая дата: {current_moscow_date} ({current_weekday})
-            - Текущее время: {current_moscow_time}
-            - Полная дата и время: {current_moscow_full}
-
-            # ИНТЕРПРЕТАЦИЯ ДАТ:
-            - Сегодня: {today}
-            - Завтра: {tomorrow}
-            - Послезавтра: {after_tomorrow}
-            - Через неделю: {week_later}
-
-            Если пользователь спрашивает о "послезавтра", это {after_tomorrow}.
-            Если пользователь спрашивает о "после после завтра", это {after_tomorrow}.
-            Если пользователь спрашивает о "через неделю", это {week_later}.
-
-            Используй эту информацию для определения даты в запросах.
-            """
-
-            # Get and format available slots for the patient
-            from reminder.openai_assistant.api_views import format_available_slots_for_prompt
-            today_date = current_moscow_datetime.date()
-            tomorrow_date = (current_moscow_datetime + timedelta(days=1)).date()
-            available_slots_context = format_available_slots_for_prompt(patient, today_date, tomorrow_date)
-
-            # Add booking instructions for specific time periods
-            booking_instructions = """
-            # КРИТИЧЕСКИ ВАЖНЫЙ АЛГОРИТМ ДЛЯ ЗАПИСИ:
-
-            Когда пользователь просит записать его на прием (например, "запиши на сегодня после обеда"):
-
-            1. ОБЯЗАТЕЛЬНО выбери конкретное время из доступных слотов выше
-            2. Для запроса "после обеда" или "днем" выбирай время после 13:30
-            3. Для запроса "утром" или "с утра" выбирай время до 12:00
-            4. Для запроса "вечером" выбирай время после 16:00
-            5. СРАЗУ ВЫЗЫВАЙ reserve_reception_for_patient с выбранным временем
-            6. НЕ ОСТАНАВЛИВАЙСЯ на этапе показа доступных времен
-
-            ПРИМЕРЫ ЗАПРОСОВ И ДЕЙСТВИЙ:
-            - "запиши на сегодня после обеда" → reserve_reception_for_patient с первым доступным временем после 13:30
-            - "запиши на завтра утром" → reserve_reception_for_patient с первым доступным временем до 12:00
-            - "запиши на вечер" → reserve_reception_for_patient с первым доступным временем после 16:00
-
-            Если пользователь явно не указал время, но просит записать его:
-            1. Предлагай конкретное время из доступных слотов
-            2. НИКОГДА не вызывай which_time_in_certain_day для таких запросов
-            3. ВСЕГДА ЗАВЕРШАЙ ЗАПИСЬ вызовом reserve_reception_for_patient
-
-            ВАЖНО: Завершай весь процесс записи за один шаг!
-            """
-
-            # Combine all instructions
-            full_instructions = instructions + "\n\n" + patient_info + "\n\n" + datetime_context + "\n\n" + available_slots_context + "\n\n" + booking_instructions
-
-            # Create assistant run with combined instructions
+            # Create assistant run with instructions
             try:
                 openai_run = self.client.beta.threads.runs.create(
                     thread_id=thread_id,
@@ -566,12 +485,30 @@ class AssistantClient:
         start_time = time_module.time()
         function_result = None
 
+        # List of valid status codes
+        valid_statuses = [
+            "success_change_reception", "success_change_reception_today", "success_change_reception_tomorrow",
+            "error_change_reception", "error_change_reception_today", "error_change_reception_tomorrow",
+            "which_time", "which_time_today", "which_time_tomorrow",
+            "error_empty_windows", "error_empty_windows_today", "error_empty_windows_tomorrow",
+            "nonworktime", "error_med_element", "no_action_required",
+            "success_deleting_reception", "error_deleting_reception", "error_change_reception_bad_date",
+            "only_first_time_tomorrow", "only_first_time_today", "only_first_time",
+            "only_two_time_tomorrow", "only_two_time_today", "only_two_time",
+            "change_only_first_time_tomorrow", "change_only_first_time_today", "change_only_first_time",
+            "change_only_two_time_tomorrow", "change_only_two_time_today", "change_only_two_time"
+        ]
+
         try:
             while time_module.time() - start_time < timeout:
-                run = self.client.beta.threads.runs.retrieve(
-                    thread_id=thread_id,
-                    run_id=run_id
-                )
+                try:
+                    run = self.client.beta.threads.runs.retrieve(
+                        thread_id=thread_id,
+                        run_id=run_id
+                    )
+                except Exception as retrieve_error:
+                    logger.error(f"Error retrieving run {run_id}: {retrieve_error}")
+                    return {"status": "bad_user_input"}
 
                 # Update status in database
                 self._update_run_status(run_id, run.status)
@@ -579,86 +516,119 @@ class AssistantClient:
                 # Process function calls if needed
                 if run.status == "requires_action" and run.required_action:
                     logger.info(f"Run {run_id} requires action - processing function calls")
-                    function_result = self._process_function_calls(thread_id, run_id, run)
+                    try:
+                        function_result = self._process_function_calls(thread_id, run_id, run)
+                    except Exception as func_error:
+                        logger.error(f"Error processing function calls: {func_error}")
+                        return {"status": "bad_user_input"}
 
                     # IMPORTANT: Return function result immediately
                     if function_result and isinstance(function_result, dict) and "status" in function_result:
+                        # Check if the status is valid
+                        if function_result["status"] not in valid_statuses and function_result[
+                            "status"] != "bad_user_input":
+                            logger.warning(
+                                f"Invalid status returned: {function_result['status']}, changing to bad_user_input")
+                            return {"status": "bad_user_input"}
+
                         logger.info(f"Returning immediate function result with status: {function_result['status']}")
                         return function_result
 
                 if run.status in ["completed", "failed", "cancelled", "expired"]:
                     logger.info(f"Run {run_id} ended with status: {run.status}")
 
-                    # If we have a function result, return it
+                    # If run failed, cancelled, or expired, return bad_user_input
+                    if run.status in ["failed", "cancelled", "expired"]:
+                        logger.warning(f"Run {run_id} ended with status {run.status}, returning bad_user_input")
+                        return {"status": "bad_user_input"}
+
+                    # If we have a function result, validate and return it
                     if function_result:
+                        # Check if the status is valid
+                        if function_result.get("status") not in valid_statuses and function_result.get(
+                                "status") != "bad_user_input":
+                            logger.warning(
+                                f"Invalid status in function result: {function_result.get('status')}, changing to bad_user_input")
+                            return {"status": "bad_user_input"}
                         return function_result
 
-                    # Otherwise check if messages contain any function references we can process
-                    messages = self.get_messages(thread_id, limit=1)
-                    if messages and hasattr(messages[0], 'content') and messages[0].content:
-                        for content_item in messages[0].content:
-                            if hasattr(content_item, 'text') and content_item.text:
-                                text = content_item.text.value
-                                # Look for function call patterns in the text
-                                function_result = self._extract_function_calls_from_text(text, thread_id)
-                                if function_result:
-                                    return function_result
+                    # Check if messages contain any function references we can process
+                    try:
+                        messages = self.get_messages(thread_id, limit=1)
+                        if messages and hasattr(messages[0], 'content') and messages[0].content:
+                            for content_item in messages[0].content:
+                                if hasattr(content_item, 'text') and content_item.text:
+                                    text = content_item.text.value
+                                    # Look for function call patterns in the text
+                                    function_result = self._extract_function_calls_from_text(text, thread_id)
+                                    if function_result:
+                                        # Validate the status
+                                        if function_result.get("status") not in valid_statuses and function_result.get(
+                                                "status") != "bad_user_input":
+                                            logger.warning(
+                                                f"Invalid status in extracted function: {function_result.get('status')}, changing to bad_user_input")
+                                            return {"status": "bad_user_input"}
+                                        return function_result
+                    except Exception as msg_error:
+                        logger.error(f"Error processing messages: {msg_error}")
+                        return {"status": "bad_user_input"}
 
                     # Before returning just the status, check if the query looks like a request for available times
-                    messages = self.get_messages(thread_id, limit=5)
-                    for message in messages:
-                        if message.role == "user":
-                            if message.content and len(message.content) > 0 and hasattr(message.content[0], 'text'):
-                                text = message.content[0].text.value.lower()
-                                if any(word in text for word in ["свободн", "доступн", "времена", "окошк", "запис"]):
-                                    # Try to extract date from request
-                                    date_str = "today"
-                                    if "завтра" in text:
-                                        date_str = "tomorrow"
-                                    elif "послезавтра" in text or "после завтра" in text:
-                                        date_str = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
+                    try:
+                        messages = self.get_messages(thread_id, limit=5)
+                        for message in messages:
+                            if message.role == "user":
+                                if message.content and len(message.content) > 0 and hasattr(message.content[0], 'text'):
+                                    text = message.content[0].text.value.lower()
+                                    if any(word in text for word in
+                                           ["свободн", "доступн", "времена", "окошк", "запис"]):
+                                        # Try to extract date from request
+                                        date_str = "today"
+                                        if "завтра" in text:
+                                            date_str = "tomorrow"
+                                        elif "послезавтра" in text or "после завтра" in text:
+                                            date_str = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
 
-                                    # Force call to which_time_in_certain_day
-                                    patient_code = None
-                                    thread = Thread.objects.filter(thread_id=thread_id).first()
-                                    if thread and thread.appointment_id:
-                                        appointment = Appointment.objects.filter(
-                                            appointment_id=thread.appointment_id).first()
-                                        if appointment:
-                                            patient_code = appointment.patient.patient_code
-                                    else:
-                                        # Try to get patient code from thread order_key
-                                        thread_obj = Thread.objects.filter(thread_id=thread_id).first()
-                                        if thread_obj and thread_obj.order_key and thread_obj.order_key.startswith(
-                                                "patient_"):
-                                            patient_code = thread_obj.order_key.replace("patient_", "")
+                                        # Force call to which_time_in_certain_day
+                                        patient_code = None
+                                        thread = Thread.objects.filter(thread_id=thread_id).first()
+                                        if thread and thread.appointment_id:
+                                            appointment = Appointment.objects.filter(
+                                                appointment_id=thread.appointment_id).first()
+                                            if appointment:
+                                                patient_code = appointment.patient.patient_code
+                                        else:
+                                            # Try to get patient code from thread order_key
+                                            thread_obj = Thread.objects.filter(thread_id=thread_id).first()
+                                            if thread_obj and thread_obj.order_key and thread_obj.order_key.startswith(
+                                                    "patient_"):
+                                                patient_code = thread_obj.order_key.replace("patient_", "")
 
-                                    if patient_code:
-                                        result = self._call_function("which_time_in_certain_day",
-                                                                     {"patient_code": patient_code,
-                                                                      "date_time": date_str}, thread_id)
-                                        formatted_result = self._format_for_acs("which_time_in_certain_day",
-                                                                                {"patient_code": patient_code,
-                                                                                 "date_time": date_str}, result)
-                                        if formatted_result and "status" in formatted_result:
-                                            return formatted_result
+                                        if patient_code:
+                                            try:
+                                                result = self._call_function("which_time_in_certain_day",
+                                                                             {"patient_code": patient_code,
+                                                                              "date_time": date_str}, thread_id)
+                                                formatted_result = self._format_for_acs("which_time_in_certain_day",
+                                                                                        {"patient_code": patient_code,
+                                                                                         "date_time": date_str}, result)
+                                                if formatted_result and "status" in formatted_result:
+                                                    # Validate the status
+                                                    if formatted_result["status"] not in valid_statuses and \
+                                                            formatted_result["status"] != "bad_user_input":
+                                                        logger.warning(
+                                                            f"Invalid status in formatted result: {formatted_result['status']}, changing to bad_user_input")
+                                                        return {"status": "bad_user_input"}
+                                                    return formatted_result
+                                            except Exception as func_error:
+                                                logger.error(f"Error calling function: {func_error}")
+                                                return {"status": "bad_user_input"}
+                    except Exception as analyze_error:
+                        logger.error(f"Error analyzing user messages: {analyze_error}")
+                        return {"status": "bad_user_input"}
 
-                    # Last resort: return status with a meaningful message
-                    if run.status == "completed":
-                        # Try to determine intent from user messages and provide a more helpful response
-                        user_message = self._get_last_user_message(thread_id).lower()
-                        if any(word in user_message for word in ["свободн", "доступн", "времена", "окошк"]):
-                            return {
-                                "status": "which_time",
-                                "message": "Информация о свободных временах не может быть получена. Пожалуйста, уточните дату."
-                            }
-                        elif any(word in user_message for word in ["запис", "перенес", "измен"]):
-                            return {
-                                "status": "success_change_reception",
-                                "message": "Не удалось обработать запрос на запись/перенос. Пожалуйста, укажите конкретную дату и время."
-                            }
-
-                    return {"status": run.status}
+                    # Last resort: if completed but no valid result, return bad_user_input
+                    return {"status": "bad_user_input"}
 
                 # Wait before checking again
                 time_module.sleep(1)
@@ -666,11 +636,11 @@ class AssistantClient:
             # If we reach here, timeout exceeded
             logger.warning(f"Run {run_id} exceeded timeout {timeout}s, cancelling")
             self._cancel_run(thread_id, run_id)
-            return {"status": "timeout"}
+            return {"status": "bad_user_input"}
 
         except Exception as e:
             logger.error(f"Error in wait_for_run_completion: {e}", exc_info=True)
-            return {"status": "error", "message": str(e)}
+            return {"status": "bad_user_input"}
 
     def _process_function_calls(self, thread_id: str, run_id: str, run) -> dict:
         """
