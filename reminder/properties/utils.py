@@ -135,3 +135,29 @@ def get_formatted_date_info(dt: datetime) -> Dict[str, str]:
         "weekday_kz": weekday_kz,
         "time": time
     }
+
+
+def is_time_within_working_hours(time_str):
+    """
+    Validates if a given time is within clinic working hours (09:00-20:30)
+    """
+    try:
+        # Parse the time string to extract hours and minutes
+        if isinstance(time_str, int):
+            hour = time_str
+            minute = 0
+        elif ":" in time_str:
+            hour, minute = map(int, time_str.split(":"))
+        else:
+            hour = int(time_str)
+            minute = 0
+
+        # Check against working hours (09:00-20:30)
+        if hour < 9 or hour > 20:
+            return False
+        if hour == 20 and minute > 30:
+            return False
+
+        return True
+    except (ValueError, TypeError):
+        return False
