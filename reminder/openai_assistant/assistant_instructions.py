@@ -3,6 +3,10 @@
 по вопросам записи на прием к врачу.
 """
 import re
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 DEFAULT_INSTRUCTIONS = """
 МЕДИЦИНСКИЙ АССИСТЕНТ ДЛЯ УПРАВЛЕНИЯ ЗАПИСЯМИ НА ПРИЕМ
@@ -713,32 +717,23 @@ def get_time_selection_instructions():
 
 
 def get_enhanced_comprehensive_instructions(user_input, patient_code, thread_id=None, assistant_client=None):
-    """
-    Creates enhanced comprehensive instructions for the assistant,
-    including improved context awareness for follow-up requests.
+    """Улучшенная функция для создания контекстуальных инструкций"""
 
-    Args:
-        user_input: User's input text
-        patient_code: Patient ID code
-        thread_id: Optional thread ID for context retrieval
-        assistant_client: AssistantClient instance for context retrieval
-
-    Returns:
-        str: Enhanced instructions
-    """
-    # First get previous context if we have a thread_id and client
+    # Получение предыдущего контекста
     previous_context = ""
     if thread_id and assistant_client:
         try:
-            # Get the most recent assistant messages
+            # Получаем сообщения из треда, показывающие доступные времена
             messages = assistant_client.client.beta.threads.messages.list(
                 thread_id=thread_id,
                 limit=5,
                 order="desc"
             )
 
-            # Look for assistant's last response with appointment times
-            assistant_response = None
+            # Ищем последний ответ ассистента с временами
+            last_times_message = None
+            last_date_mentioned = None
+
             for message in messages.data:
                 if message.role == "assistant" and hasattr(message, 'content') and message.content:
                     content_text = ""
@@ -746,77 +741,72 @@ def get_enhanced_comprehensive_instructions(user_input, patient_code, thread_id=
                         if hasattr(content_item, 'text') and content_item.text:
                             content_text += content_item.text.value
 
-                    # Check if it contains times information
-                    if any(marker in content_text for marker in
-                           ["first_time", "second_time", "third_time", "Свободные интервалы"]):
-                        assistant_response = content_text
+                    # Проверяем наличие маркеров доступных времен
+                    if "first_time" in content_text or "which_time" in content_text:
+                        last_times_message = content_text
+
+                        # Ищем упоминание даты
+                        date_pattern = r'"date"\s*:\s*"(\d+\s+[А-Яа-я]+)"'
+                        date_match = re.search(date_pattern, content_text)
+
+                        # Ищем упоминание дня (сегодня/завтра)
+                        day_pattern = r'"day"\s*:\s*"([а-яА-Я]+)"'
+                        day_match = re.search(day_pattern, content_text)
+
+                        if date_match:
+                            last_date_mentioned = date_match.group(1)
+
+                        if day_match:
+                            day_mentioned = day_match.group(1)
+                            if day_mentioned == "завтра":
+                                is_tomorrow = True
+                            elif day_mentioned == "сегодня":
+                                is_tomorrow = False
+
                         break
 
-            if assistant_response:
-                # Extract date and times from previous response
-                date_pattern = r'"date": "(\d+ [А-Яа-я]+)"'
-                date_match = re.search(date_pattern, assistant_response)
+            # Если нашли сообщение с временами и датой
+            if last_times_message and last_date_mentioned:
+                # Извлечем времена из сообщения
+                time_pattern = r'"(first_time|second_time|third_time)"\s*:\s*"([0-9:]+)"'
+                time_matches = re.findall(time_pattern, last_times_message)
 
-                time_pattern = r'"(first_time|second_time|third_time)": "(\d{1,2}:\d{2})"'
-                time_matches = re.findall(time_pattern, assistant_response)
-
-                if date_match and time_matches:
-                    previous_date = date_match.group(1)
-                    previous_times = {match[0]: match[1] for match in time_matches}
-
+                if time_matches:
                     previous_context = f"""
-                    ## ВАЖНЫЙ КОНТЕКСТ ПРЕДЫДУЩЕГО ОТВЕТА
+                    ## КРИТИЧЕСКИ ВАЖНЫЙ ПРЕДЫДУЩИЙ КОНТЕКСТ
 
-                    В предыдущем ответе я показал пациенту следующие доступные времена на {previous_date}:
+                    В предыдущем ответе я показал пациенту следующие доступные времена:
 
+                    ### Дата: {last_date_mentioned} ({'завтра' if is_tomorrow else 'сегодня'})
                     """
 
-                    for key, time in previous_times.items():
-                        label = {
-                            "first_time": "Первое время (first_time)",
-                            "second_time": "Второе время (second_time)",
-                            "third_time": "Третье время (third_time)"
-                        }.get(key, key)
-                        previous_context += f"- {label}: {time}\n"
+                    for time_type, time_value in time_matches:
+                        time_label = {
+                            "first_time": "Первое время",
+                            "second_time": "Второе время",
+                            "third_time": "Третье время"
+                        }.get(time_type, time_type)
+
+                        previous_context += f"- {time_label}: {time_value}\n"
 
                     previous_context += """
-                    ## ПРАВИЛА ОБРАБОТКИ ССЫЛОК НА ПРЕДЫДУЩИЙ ОТВЕТ
+                    ## ПРАВИЛА ОБРАБОТКИ ССЫЛОК НА ПРЕДЫДУЩИЕ ВРЕМЕНА
 
-                    Когда пользователь ссылается на время из предыдущего ответа:
+                    Когда пользователь ссылается на времена из предыдущего контекста:
 
-                    1. Фразы "первое время", "первый вариант", "первое", "на первое" → выбирай first_time
-                    2. Фразы "второе время", "второй вариант", "второе", "на второе" → выбирай second_time
-                    3. Фразы "третье время", "третий вариант", "третье", "на третье" → выбирай third_time
+                    1. Если пользователь говорит "первое время", "первый вариант", "первое" → ему нужно первое время из списка выше
+                    2. Если пользователь говорит "второе время", "второй вариант", "второе" → ему нужно второе время из списка выше
+                    3. Если пользователь говорит "третье время", "третий вариант", "третье" → ему нужно третье время из списка выше
 
-                    При этом ВСЕГДА используй ДАТУ из предыдущего ответа, а не сегодняшнюю дату!
+                    КРИТИЧЕСКИ ВАЖНО: Используй именно ту ДАТУ, которая была показана ранее! 
+                    Не используй сегодняшнюю дату, если в предыдущем ответе была показана дата завтрашнего дня!
 
-                    Если пользователь явно упоминает в своем запросе день ("сегодня", "завтра"), 
-                    то это перекрывает контекст и нужно использовать указанный день,
-                    но в противном случае ВСЕГДА используй дату из предыдущего контекста.
-
-                    ## ПРИМЕР ОБРАБОТКИ ЗАПРОСА С КОНТЕКСТОМ
-
-                    Запрос: "Давайте на второе время"
-                    Правильная дата: {previous_date} (из контекста)
-                    Правильное время: {previous_times.get('second_time', 'N/A')} (second_time из контекста)
-
-                    ## КРИТИЧЕСКИ ВАЖНОЕ ПРАВИЛО
-
-                    НЕ ИСПОЛЬЗУЙ сегодняшнюю дату при обработке запросов вида "давайте на второе время", 
-                    "запишите на первое время", "третий вариант подходит" - в этом случае ВСЕГДА 
-                    используй дату из предыдущего ответа.
-                    
-                    ## РАБОЧИЕ ЧАСЫ КЛИНИКИ
-
-                    Клиника работает с 09:00 до 20:30. Если пациент запрашивает время вне этого диапазона,
-                    НЕОБХОДИМО вернуть статус "nonworktime" вместо предложения альтернативных времен.
+                    Текущий запрос "{user_input}" должен быть интерпретирован в контексте вышеуказанных времен и дат!
                     """
-
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error retrieving context: {e}")
-            # Continue without context if error occurs
+            logger.error(f"Ошибка при получении контекста: {e}")
+
+    # Далее идут остальные инструкции...
 
     # Core instructions
     instructions = f"""
