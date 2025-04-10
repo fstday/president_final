@@ -717,7 +717,7 @@ def get_time_selection_instructions():
 
 
 def get_enhanced_comprehensive_instructions(user_input, patient_code, thread_id=None, assistant_client=None):
-    """Улучшенная функция для создания контекстуальных инструкций"""
+    """Улучшенная функция для создания контекстуальных инструкций с акцентом на время суток"""
 
     # Получение предыдущего контекста
     previous_context = ""
@@ -733,6 +733,7 @@ def get_enhanced_comprehensive_instructions(user_input, patient_code, thread_id=
             # Ищем последний ответ ассистента с временами
             last_times_message = None
             last_date_mentioned = None
+            is_tomorrow = False
 
             for message in messages.data:
                 if message.role == "assistant" and hasattr(message, 'content') and message.content:
@@ -806,7 +807,46 @@ def get_enhanced_comprehensive_instructions(user_input, patient_code, thread_id=
         except Exception as e:
             logger.error(f"Ошибка при получении контекста: {e}")
 
-    # Далее идут остальные инструкции...
+    # Анализ текущего запроса на наличие указаний времени суток
+    time_of_day_context = ""
+    user_input_lower = user_input.lower()
+
+    # Определение времени суток из запроса
+    if any(word in user_input_lower for word in ["утр", "утром", "утренн", "рано", "пораньше"]):
+        time_period = "утро"
+        specific_time = "10:30"
+        time_range = "до 12:00"
+    elif any(word in user_input_lower for word in ["обед", "днем", "днём", "день", "полдень"]):
+        time_period = "обед"
+        specific_time = "13:30"
+        time_range = "с 12:00 до 16:00"
+    elif any(word in user_input_lower for word in ["вечер", "вечером", "поздно", "ужин", "вечерн"]):
+        time_period = "вечер"
+        specific_time = "18:30"
+        time_range = "после 16:00"
+    else:
+        time_period = None
+
+    if time_period:
+        time_of_day_context = f"""
+        ## ВАЖНО: ЗАПРОС СОДЕРЖИТ УКАЗАНИЕ НА ВРЕМЯ СУТОК
+
+        Пользователь запрашивает запись на **{time_period}**.
+
+        ### Критически важные правила обработки:
+
+        1. Для {time_period} всегда используй конкретное время: **{specific_time}**
+        2. Если запрашивается список доступных времен, фильтруй только времена {time_range}
+        3. Предлагай только те времена, которые соответствуют указанному времени суток
+        4. Если точное время {specific_time} недоступно, ищи ближайшие альтернативы в указанном периоде дня
+        5. НИКОГДА не предлагай времена из других периодов дня, если есть хотя бы одно время в запрошенном периоде
+
+        ### При записи на {time_period}:
+
+        1. СНАЧАЛА попробуй записать на точное время {specific_time}
+        2. Если время {specific_time} недоступно, предложи свободные времена ТОЛЬКО для {time_period} ({time_range})
+        3. Используй фильтрацию времен для соответствия запрошенному времени суток
+        """
 
     # Core instructions
     instructions = f"""
@@ -818,6 +858,15 @@ def get_enhanced_comprehensive_instructions(user_input, patient_code, thread_id=
     ВЫЗЫВАТЬ СООТВЕТСТВУЮЩУЮ ФУНКЦИЮ и форматировать ответ по требованиям системы.
 
     {previous_context}
+
+    {time_of_day_context}
+
+    ## КРИТИЧЕСКОЕ ПРАВИЛО: ОДИН ВЫЗОВ ФУНКЦИИ
+
+    1. ЗАПРЕЩЕНО вызывать несколько функций последовательно в одном запросе
+    2. Для каждого запроса должна быть вызвана ТОЛЬКО ОДНА функция
+    3. НИКОГДА не вызывай appointment_time_for_patient при запросе записи на определенное время/день
+    4. При запросе "запиши меня на завтра вечером" - СРАЗУ используй reserve_reception_for_patient, а НЕ appointment_time_for_patient
 
     ## ОБРАБОТКА ДАТ В БУДУЩЕМ
 
