@@ -342,4 +342,5 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
         }
 
 
-reserve_reception_for_patient('990000735', date_from_patient='2025-04-01 14:00:00', trigger_id=1)
+if __name__ == '__main__':
+    reserve_reception_for_patient('990000735', date_from_patient='2025-04-01 14:00:00', trigger_id=1)
