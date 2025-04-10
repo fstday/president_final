@@ -774,7 +774,7 @@ class AssistantClient:
 
             # Process each function call
             tool_outputs = []
-            formatted_result = None
+            last_formatted_result = None
 
             for tool_call in tool_calls:
                 function_name = tool_call.function.name
@@ -795,38 +795,38 @@ class AssistantClient:
                     "output": json.dumps(raw_result)
                 })
 
-                # If we have a valid formatted result, return it immediately
+                # Store the last valid formatted result
                 if formatted_result and "status" in formatted_result:
-                    # Submit tool outputs to avoid leaving the run hanging
-                    try:
+                    last_formatted_result = formatted_result
+
+            # Submit all tool outputs in one go
+            try:
+                self.client.beta.threads.runs.submit_tool_outputs(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    tool_outputs=tool_outputs
+                )
+                logger.info(f"Submitted {len(tool_outputs)} tool outputs")
+            except Exception as submit_e:
+                logger.error(f"Error submitting tool outputs: {submit_e}")
+                # If submission fails, try to submit outputs for each call individually
+                try:
+                    for output in tool_outputs:
                         self.client.beta.threads.runs.submit_tool_outputs(
                             thread_id=thread_id,
                             run_id=run_id,
-                            tool_outputs=tool_outputs
+                            tool_outputs=[output]
                         )
-                        logger.info(f"Submitted {len(tool_outputs)} tool outputs")
-                    except Exception as submit_e:
-                        logger.warning(f"Error submitting tool outputs: {submit_e}")
+                    logger.info("Successfully submitted tool outputs individually")
+                except Exception as individual_submit_e:
+                    logger.error(f"Error submitting tool outputs individually: {individual_submit_e}")
 
-                    # Return formatted result for immediate response
-                    return formatted_result
+            # Return the last valid formatted result
+            return last_formatted_result
 
-            # If no immediate result was returned, submit outputs and return None
-            if tool_outputs:
-                try:
-                    self.client.beta.threads.runs.submit_tool_outputs(
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        tool_outputs=tool_outputs
-                    )
-                    logger.info(f"Submitted {len(tool_outputs)} tool outputs")
-                except Exception as e:
-                    logger.error(f"Error submitting tool outputs: {e}")
-
-            return formatted_result  # Will be None if no immediate result was found
         except Exception as e:
             logger.error(f"Error processing function calls: {e}", exc_info=True)
-            return None
+            return {"status": "error_med_element", "message": str(e)}
 
     def _extract_function_calls_from_text(self, text: str, thread_id: str) -> Optional[dict]:
         """
