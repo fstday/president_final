@@ -28,6 +28,7 @@ cert_file_path = os.path.join(certs_dir, 'cert.pem')
 key_file_path = os.path.join(certs_dir, 'key.pem')
 current_date_time_for_xml = datetime.now().strftime('%Y%m%d%H%M%S')
 
+
 def which_time_in_certain_day(patient_code, date_time):
     """
     Обработка запроса для получения доступных интервалов на определенный день.

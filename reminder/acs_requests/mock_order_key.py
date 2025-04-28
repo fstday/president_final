@@ -10,10 +10,10 @@ from reminder.properties.utils import ACS_BASE_URL, get_latest_api_key
 
 
 def send_single_patient_to_acs(
-        phone='77070699414',
-        full_name='Тест Иван Иванович',
-        gp='00PP0consulta',
-        additional_info=None
+        phone,
+        full_name,
+        gp,
+        additional_info
 ):
     """
     Отправляет одного пациента в ACS систему с возможностью передачи дополнительных параметров.
@@ -96,7 +96,7 @@ def send_single_patient_to_acs(
 if __name__ == "__main__":
     # Пример использования с дополнительными параметрами
     send_single_patient_to_acs(
-        phone='77070699414',
+        phone='77073032629',
         full_name='Тест Иван Иванович',
         gp='00PP0consulta',
         additional_info={
