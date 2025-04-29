@@ -39,7 +39,7 @@ def get_patient_doctor_schedule(patient_code, days_horizon=7, online_mode=0, ret
 
     Параметры:
     patient_code (int): Код пациента
-    days_horizon (int): Горизонт планирования в днях (7 или 14)
+    days_horizon (int): Горизонт планирования в днях (используется только для расчета даты окончания)
     online_mode (int): Режим приема: 0 - в клинике, 1 - и клиника и онлайн
     return_raw (bool): Если True, возвращает сырой XML-ответ
 
@@ -82,11 +82,16 @@ def get_patient_doctor_schedule(patient_code, days_horizon=7, online_mode=0, ret
         msh_10 = generate_msh_10()
 
         # Properly format filter lists based on retrieved data
-        filial_list = f"<FILIALLIST>{clinic_id}</FILIALLIST>" if clinic_id else "<FILIALLIST></FILIALLIST>"
-        dep_list = f"<DEPLIST>{department_id}</DEPLIST>" if department_id else "<DEPLIST></DEPLIST>"
-        doct_list = f"<DOCTLIST>{doctor_code}</DOCTLIST>" if doctor_code else "<DOCTLIST></DOCTLIST>"
+        filial_element = f"<FILIALLIST>{clinic_id}</FILIALLIST>" if clinic_id else "<FILIALLIST></FILIALLIST>"
 
-        # Формируем XML запрос согласно XSD-схеме
+        # Only include DOCTLIST if doctor_code exists, otherwise empty
+        doct_element = f"<DOCTLIST>{doctor_code}</DOCTLIST>" if doctor_code else "<DOCTLIST></DOCTLIST>"
+
+        # Only include DEPLIST if doctor_code doesn't exist and department_id exists
+        dep_element = "" if doctor_code else (
+            f"<CASHLIST>{department_id}</CASHLIST>" if department_id else "<CASHLIST></CASHLIST>")
+
+        # Construct the XML request
         xml_request = f'''
         <WEB_DOCT_SCHEDULE_FREE xmlns="http://sdsys.ru/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
           <MSH>
@@ -102,9 +107,9 @@ def get_patient_doctor_schedule(patient_code, days_horizon=7, online_mode=0, ret
             <MSH.99>{clinic_id if clinic_id else ""}</MSH.99>
           </MSH>
           <DOCT_SCHEDULE_FREE_IN>
-            {filial_list}
-            {dep_list}
-            {doct_list}
+            {filial_element}
+            {dep_element}
+            {doct_element}
             <SCHEDIDENTLIST></SCHEDIDENTLIST>
             <BDATE>{bdate}</BDATE>
             <FDATE>{fdate}</FDATE>
@@ -135,82 +140,8 @@ def get_patient_doctor_schedule(patient_code, days_horizon=7, online_mode=0, ret
             if return_raw:
                 return response.text
 
-            # Иначе разбираем XML-ответ
-            result = parse_doctor_schedule_response(response.text)
-
-            # Если запрашивается расписание на 2 недели, делаем второй запрос
-            if days_horizon > 7 and result.get('success', False):
-                # Запрашиваем вторую неделю
-                second_week_start = current_date + timedelta(days=7)
-                second_week_end = current_date + timedelta(days=14)
-
-                bdate_second = second_week_start.strftime("%Y%m%d")
-                fdate_second = second_week_end.strftime("%Y%m%d")
-
-                # Новая метка времени и ID сообщения для второго запроса
-                ts_2 = datetime.now().strftime("%Y%m%d%H%M%S")
-                msh_10_second = generate_msh_10()
-
-                # Формируем запрос на вторую неделю (соблюдая порядок элементов по XSD)
-                # Use the same format for the second week request
-                xml_request_second = f'''
-                <WEB_DOCT_SCHEDULE_FREE xmlns="http://sdsys.ru/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-                  <MSH>
-                    <MSH.7>
-                      <TS.1>{ts_2}</TS.1>
-                    </MSH.7>
-                    <MSH.9>
-                      <MSG.1>WEB</MSG.1>
-                      <MSG.2>DOCT_SCHEDULE_FREE</MSG.2>
-                    </MSH.9>
-                    <MSH.10>{msh_10_second}</MSH.10>
-                    <MSH.18>UTF-8</MSH.18>
-                    <MSH.99>{clinic_id if clinic_id else ""}</MSH.99>
-                  </MSH>
-                  <DOCT_SCHEDULE_FREE_IN>
-                    {filial_list}
-                    {dep_list}
-                    {doct_list}
-                    <SCHEDIDENTLIST></SCHEDIDENTLIST>
-                    <BDATE>{bdate_second}</BDATE>
-                    <FDATE>{fdate_second}</FDATE>
-                    <ONLINEMODE>{online_mode}</ONLINEMODE>
-                  </DOCT_SCHEDULE_FREE_IN>
-                </WEB_DOCT_SCHEDULE_FREE>
-                '''
-
-                logger.info(f"Отправка второго запроса DOCT_SCHEDULE_FREE (вторая неделя):\n{xml_request_second}")
-
-                # Выполняем второй запрос
-                response_second = requests.post(
-                    url=infoclinica_api_url,
-                    headers={
-                        'X-Forwarded-Host': infoclinica_x_forwarded_host,
-                        'Content-Type': 'text/xml'
-                    },
-                    data=xml_request_second,
-                    cert=(cert_file_path, key_file_path),
-                    verify=True
-                )
-
-                # Обрабатываем результат второго запроса
-                if response_second.status_code == 200:
-                    logger.info(f"Получен ответ для второй недели (длина: {len(response_second.text)} символов)")
-
-                    # Если запрошен сырой ответ, возвращаем оба ответа
-                    if return_raw:
-                        return {"week1": response.text, "week2": response_second.text}
-
-                    # Объединяем результаты обоих запросов
-                    second_week_result = parse_doctor_schedule_response(response_second.text)
-                    if second_week_result and second_week_result.get('success',
-                                                                     False) and 'schedules' in second_week_result:
-                        result['schedules'].extend(second_week_result['schedules'])
-                else:
-                    logger.error(f"❌ Ошибка при запросе второй недели: {response_second.status_code}")
-                    logger.error(f"Ответ сервера: {response_second.text}")
-
-            return result
+            # Иначе разбираем XML-ответ и возвращаем результат
+            return parse_doctor_schedule_response(response.text)
         else:
             logger.error(f"❌ Ошибка запроса: {response.status_code}")
             logger.error(f"Ответ сервера: {response.text}")
@@ -554,12 +485,19 @@ if __name__ == "__main__":
     # Пример с пациентом из реальных данных
     patient_code = 990000735  # Пример: Тест Иван Иванович
 
-    # Вариант 1: Получение обработанного расписания
-    print("\nПОЛУЧЕНИЕ ГРАФИКА РАБОТЫ ДЛЯ ПАЦИЕНТА (обработанный вывод)")
-    patient_schedule = get_patient_doctor_schedule(patient_code)
-    print_doctor_schedule(patient_schedule)
-
-    # Вариант 2: Получение сырого XML-ответа
-    print("\nПОЛУЧЕНИЕ ГРАФИКА РАБОТЫ ДЛЯ ПАЦИЕНТА (сырой XML)")
+    # Сначала получаем сырой XML-ответ
+    print("\nПОЛУЧЕНИЕ ГРАФИКА РАБОТЫ ДЛЯ ПАЦИЕНТА")
     raw_response = get_patient_doctor_schedule(patient_code, return_raw=True)
+
+    # Сохраняем сырой ответ для печати позже
+    print("\nСЫРОЙ XML-ОТВЕТ:")
+    print("-" * 80)
     print(raw_response)
+    print("-" * 80)
+
+    # Затем используем сырой ответ для создания обработанного вывода
+    processed_result = parse_doctor_schedule_response(raw_response)
+
+    # Печатаем обработанный вывод
+    print("\nОБРАБОТАННЫЙ ВЫВОД:")
+    print_doctor_schedule(processed_result)
