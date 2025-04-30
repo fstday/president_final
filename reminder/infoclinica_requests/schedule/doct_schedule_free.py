@@ -5,13 +5,7 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
-# Настройки Django
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
-django.setup()
-
 # Настройка логирования
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Импорты моделей
@@ -362,6 +356,8 @@ def parse_doctor_schedule_response(xml_response):
 
                         # Добавляем форматированные значения для удобства
                         schedule_data['date_formatted'] = f"{day:02d}.{month:02d}.{year}"
+                        schedule_data[
+                            'date_iso'] = f"{year}-{month:02d}-{day:02d}"  # Формат YYYY-MM-DD для совместимости
 
                         # Форматируем время начала и конца
                         if all(k in schedule_data for k in ['begin_hour', 'begin_min', 'end_hour', 'end_min']):
@@ -415,89 +411,79 @@ def parse_doctor_schedule_response(xml_response):
         }
 
 
-def print_doctor_schedule(schedule_data):
+def check_day_has_free_slots(patient_code, date_str):
     """
-    Вспомогательная функция для вывода графика в удобном формате.
+    Проверяет, есть ли свободные слоты на конкретный день
 
-    Параметры:
-    schedule_data (dict): Данные графика работы
+    Args:
+        patient_code: Код пациента
+        date_str: Дата в формате YYYY-MM-DD
+
+    Returns:
+        dict: Информация о доступности слотов
+            - has_slots (bool): Есть ли свободные слоты
+            - doctor_code (str/int): Код врача, если найден
+            - department_id (str/int): ID отделения, если найдено
+            - clinic_id (str/int): ID клиники, если найдена
     """
-    if not schedule_data or not schedule_data.get('success', False):
-        error = schedule_data.get('error', 'Неизвестная ошибка') if schedule_data else 'Нет данных'
-        print(f"❌ Не удалось получить график: {error}")
-        return
+    try:
+        # Преобразуем строку даты в объект datetime
+        if date_str == "today":
+            check_date = datetime.now()
+            date_str = check_date.strftime("%Y-%m-%d")
+        elif date_str == "tomorrow":
+            check_date = datetime.now() + timedelta(days=1)
+            date_str = check_date.strftime("%Y-%m-%d")
+        else:
+            check_date = datetime.strptime(date_str, "%Y-%m-%d")
 
-    schedules = schedule_data.get('schedules', [])
-    if not schedules:
-        print("ℹ️ График работы пуст или недоступен")
-        return
+        # Получаем расписание
+        schedule_result = get_patient_doctor_schedule(patient_code, days_horizon=7)
 
-    print(f"\n{'=' * 80}")
-    print(f"ГРАФИК РАБОТЫ (всего интервалов: {len(schedules)})")
-    print(f"{'=' * 80}")
+        if not schedule_result.get('success', False):
+            logger.error(f"Ошибка при получении графика: {schedule_result.get('error', 'Неизвестная ошибка')}")
+            return {
+                'has_slots': False,
+                'doctor_code': None,
+                'department_id': None,
+                'clinic_id': None
+            }
 
-    # Группируем по дате, врачу и клинике
-    current_date = None
-    current_doctor = None
-    current_clinic = None
+        schedules = schedule_result.get('schedules', [])
 
-    for slot in schedules:
-        date = slot.get('date_formatted')
-        doctor = f"{slot.get('doctor_name')} (ID: {slot.get('doctor_code')})"
-        clinic = f"{slot.get('clinic_name')} (ID: {slot.get('clinic_id')})"
+        # Форматируем дату для поиска
+        search_date_iso = check_date.strftime("%Y-%m-%d")
 
-        if date != current_date:
-            print(f"\n{'-' * 80}")
-            print(f"📅 ДАТА: {date}")
-            print(f"{'-' * 80}")
-            current_date = date
-            current_doctor = None
-            current_clinic = None
+        # Ищем слоты на указанную дату
+        has_slots = False
+        doctor_code = None
+        department_id = None
+        clinic_id = None
 
-        if doctor != current_doctor or clinic != current_clinic:
-            print(f"\n👨‍⚕️ ВРАЧ: {doctor}")
-            print(f"🏥 Филиал: {clinic}")
-            print(f"🏢 Отделение: {slot.get('department_name')} (ID: {slot.get('department_id')})")
-            current_doctor = doctor
-            current_clinic = clinic
+        for slot in schedules:
+            slot_date = slot.get('date_iso')
 
-        # Цветовая индикация свободных/занятых интервалов
-        slot_indicator = "✅" if slot.get('has_free_slots', False) else "❌"
-        room_info = f"Кабинет: {slot.get('room_num', '-')}"
-        if 'room_floor' in slot and slot['room_floor']:
-            room_info += f", Этаж: {slot['room_floor']}"
-        if 'room_building' in slot and slot['room_building']:
-            room_info += f", Корпус: {slot['room_building']}"
+            if slot_date == search_date_iso and slot.get('has_free_slots', False):
+                has_slots = True
+                doctor_code = slot.get('doctor_code')
+                department_id = slot.get('department_id')
+                clinic_id = slot.get('clinic_id')
+                break
 
-        free_info = ""
-        if 'free_count' in slot and slot['free_count'] > 0:
-            free_info = f"Свободно слотов: {slot['free_count']}"
+        logger.info(f"Проверка доступности слотов на {date_str}: {'Доступны' if has_slots else 'Не доступны'}")
 
-        print(f"{slot_indicator} {slot.get('begin_time')} - {slot.get('end_time')} "
-              f"({slot.get('duration_minutes', '-')} мин.) "
-              f"{room_info} | {slot.get('online_mode_text', '-')} | {free_info}")
+        return {
+            'has_slots': has_slots,
+            'doctor_code': doctor_code,
+            'department_id': department_id,
+            'clinic_id': clinic_id
+        }
 
-    print(f"\n{'=' * 80}\n")
-
-
-# Пример использования
-if __name__ == "__main__":
-    # Пример с пациентом из реальных данных
-    patient_code = 990000735  # Пример: Тест Иван Иванович
-
-    # Сначала получаем сырой XML-ответ
-    print("\nПОЛУЧЕНИЕ ГРАФИКА РАБОТЫ ДЛЯ ПАЦИЕНТА")
-    raw_response = get_patient_doctor_schedule(patient_code, return_raw=True)
-
-    # Сохраняем сырой ответ для печати позже
-    print("\nСЫРОЙ XML-ОТВЕТ:")
-    print("-" * 80)
-    print(raw_response)
-    print("-" * 80)
-
-    # Затем используем сырой ответ для создания обработанного вывода
-    processed_result = parse_doctor_schedule_response(raw_response)
-
-    # Печатаем обработанный вывод
-    print("\nОБРАБОТАННЫЙ ВЫВОД:")
-    print_doctor_schedule(processed_result)
+    except Exception as e:
+        logger.error(f"Ошибка при проверке доступности слотов: {e}", exc_info=True)
+        return {
+            'has_slots': False,
+            'doctor_code': None,
+            'department_id': None,
+            'clinic_id': None
+        }
