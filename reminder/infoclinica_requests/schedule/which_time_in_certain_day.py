@@ -8,10 +8,12 @@ from dotenv import load_dotenv
 import os
 
 from reminder.infoclinica_requests.schedule.doct_schedule_free import check_day_has_free_slots
+from reminder.infoclinica_requests.schedule.schedule_cache import (
+    get_cached_schedule, cache_schedule, check_day_has_slots_from_cache
+)
 from reminder.models import Patient, Appointment, QueueInfo, Clinic, AvailableTimeSlot
 from reminder.infoclinica_requests.utils import format_doctor_name, format_russian_date
 from django.utils.timezone import make_aware
-from reminder.openai_assistant.api_views import get_date_relation
 
 # Загрузка переменных окружения и настройка логирования
 load_dotenv()
@@ -33,7 +35,7 @@ current_date_time_for_xml = datetime.now().strftime('%Y%m%d%H%M%S')
 def which_time_in_certain_day(patient_code, date_time):
     """
     Получение доступных временных слотов на определенный день.
-    Использует предварительную проверку наличия свободных окон через DOCT_SCHEDULE_FREE.
+    Использует предварительную проверку наличия свободных окон через кэшированный DOCT_SCHEDULE_FREE.
 
     Args:
         patient_code (str/int): Код пациента
@@ -42,6 +44,8 @@ def which_time_in_certain_day(patient_code, date_time):
     Returns:
         dict/JsonResponse: Информация о доступных слотах или соответствующая ошибка
     """
+    from reminder.openai_assistant.api_views import get_date_relation
+
     global doctor_name
     logger.info(
         f"Я в функции which_time_in_certain_day\nПришедшие данные: \npatient_code: {patient_code}\ndate_time: {date_time}")
@@ -55,8 +59,16 @@ def which_time_in_certain_day(patient_code, date_time):
         else:
             date_str = date_time
 
-        # Предварительная проверка наличия свободных окон на указанную дату
-        day_check = check_day_has_free_slots(patient_code, date_str)
+        # Проверяем кэш для доступных слотов
+        cached_schedule = get_cached_schedule(patient_code)
+
+        if cached_schedule:
+            logger.info(f"Используем кэшированные данные для проверки доступности слотов на {date_str}")
+            day_check = check_day_has_slots_from_cache(patient_code, date_str, cached_schedule)
+        else:
+            # Если кэша нет, делаем запрос, который автоматически кэширует результат
+            logger.info(f"Кэш не найден, выполняем запрос DOCT_SCHEDULE_FREE для {date_str}")
+            day_check = check_day_has_free_slots(patient_code, date_str)
 
         # Если на этот день нет свободных окон, сразу возвращаем соответствующий статус
         if not day_check.get('has_slots', False):
@@ -92,44 +104,59 @@ def which_time_in_certain_day(patient_code, date_time):
         doctor_code = None
         doctor_name = None
 
-        # Сначала проверяем в записях
-        appointment = Appointment.objects.filter(patient=patient, is_active=True).first()
-        if appointment:
-            if appointment.doctor:
-                doctor_code = appointment.doctor.doctor_code
-                doctor_name = appointment.doctor.full_name
-                logger.info(f"Найден доктор из активной записи: {doctor_name} (ID: {doctor_code})")
+        # Пытаемся получить доктора из кэшированных данных
+        if day_check.get('doctor_code'):
+            doctor_code = day_check.get('doctor_code')
+            logger.info(f"Получен доктор из кэша: {doctor_code}")
+        else:
+            # Сначала проверяем в записях
+            appointment = Appointment.objects.filter(patient=patient, is_active=True).first()
+            if appointment:
+                if appointment.doctor:
+                    doctor_code = appointment.doctor.doctor_code
+                    doctor_name = appointment.doctor.full_name
+                    logger.info(f"Найден доктор из активной записи: {doctor_name} (ID: {doctor_code})")
 
-        # Если не нашли в записях, проверяем в очереди
-        if doctor_code is None:
-            queue_entry = QueueInfo.objects.filter(patient=patient).first()
-            if queue_entry and queue_entry.doctor_code:
-                doctor_code = queue_entry.doctor_code
-                doctor_name = queue_entry.doctor_name
-                logger.info(f"Найден доктор из очереди: {doctor_name} (ID: {doctor_code})")
-            else:
-                logger.info('Доктор и его код не найден')
-                return JsonResponse({'status': 'error', 'message': 'Не найден доктор для пациента'}, status=400)
+            # Если не нашли в записях, проверяем в очереди
+            if doctor_code is None:
+                queue_entry = QueueInfo.objects.filter(patient=patient).first()
+                if queue_entry and queue_entry.doctor_code:
+                    doctor_code = queue_entry.doctor_code
+                    doctor_name = queue_entry.doctor_name
+                    logger.info(f"Найден доктор из очереди: {doctor_name} (ID: {doctor_code})")
+                else:
+                    logger.info('Доктор и его код не найден')
+                    return JsonResponse({'status': 'error', 'message': 'Не найден доктор для пациента'}, status=400)
 
         # КРИТИЧЕСКИ ВАЖНО: Получаем TOFILIAL (целевой филиал)
         target_branch_id = None
 
-        # Сначала ищем в очередях
-        queue_entry = QueueInfo.objects.filter(patient=patient).order_by('-created_at').first()
-        if queue_entry and queue_entry.target_branch:
-            target_branch_id = queue_entry.target_branch.clinic_id
-            logger.info(f"Найден TOFILIAL из очереди: {target_branch_id}")
+        # Пытаемся получить филиал из кэшированных данных
+        if day_check.get('clinic_id'):
+            target_branch_id = day_check.get('clinic_id')
+            logger.info(f"Получен TOFILIAL из кэша: {target_branch_id}")
+        else:
+            # Сначала ищем в очередях
+            queue_entry = QueueInfo.objects.filter(patient=patient).order_by('-created_at').first()
+            if queue_entry and queue_entry.target_branch:
+                target_branch_id = queue_entry.target_branch.clinic_id
+                logger.info(f"Найден TOFILIAL из очереди: {target_branch_id}")
 
-        # Если не нашли в очередях, смотрим в записях
-        if target_branch_id is None and appointment and appointment.clinic:
-            target_branch_id = appointment.clinic.clinic_id
-            logger.info(f"Найден TOFILIAL из записи: {target_branch_id}")
+            # Если не нашли в очередях, смотрим в записях
+            appointment = Appointment.objects.filter(patient=patient, is_active=True).first()
+            if target_branch_id is None and appointment and appointment.clinic:
+                target_branch_id = appointment.clinic.clinic_id
+                logger.info(f"Найден TOFILIAL из записи: {target_branch_id}")
 
-        # Если всё равно не нашли, используем значение по умолчанию с предупреждением
-        if target_branch_id is None:
-            target_branch_id = 1  # Значение по умолчанию
-            logger.warning(f"⚠ КРИТИЧЕСКАЯ ОШИБКА: TOFILIAL не найден для пациента {patient_code}!")
-            logger.warning("⚠ Используем значение по умолчанию 1, но это может привести к ошибкам!")
+            # Если всё равно не нашли, используем значение по умолчанию с предупреждением
+            if target_branch_id is None:
+                target_branch_id = 1  # Значение по умолчанию
+                logger.warning(f"⚠ КРИТИЧЕСКАЯ ОШИБКА: TOFILIAL не найден для пациента {patient_code}!")
+                logger.warning("⚠ Используем значение по умолчанию 1, но это может привести к ошибкам!")
+
+        # Получаем имя врача
+        if doctor_name is None:
+            doctor_name = format_doctor_name(patient_code)
 
         formatted_doc_name_final = doctor_name if doctor_name else format_doctor_name(patient_code)
 
@@ -223,6 +250,7 @@ def which_time_in_certain_day(patient_code, date_time):
             ).delete()
 
             # Затем сохраняем новые
+            appointment = Appointment.objects.filter(patient=patient, is_active=True).first()
             doctor_obj = appointment.doctor if appointment and appointment.doctor else None
             clinic_obj = None
 

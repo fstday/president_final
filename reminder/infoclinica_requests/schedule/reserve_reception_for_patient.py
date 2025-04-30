@@ -9,7 +9,6 @@ from django.http import JsonResponse
 from dotenv import load_dotenv
 
 from reminder.infoclinica_requests.schedule.doct_schedule_free import check_day_has_free_slots
-from reminder.openai_assistant.api_views import get_date_relation
 from reminder.infoclinica_requests.schedule.schedule_rec_reserve import schedule_rec_reserve
 from reminder.infoclinica_requests.utils import compare_times_for_redis, compare_times, format_doctor_name
 from reminder.models import Patient, Appointment, QueueInfo
@@ -44,6 +43,8 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id):
     Returns:
         dict/JsonResponse: Результат операции с соответствующим статусом
     """
+    from reminder.openai_assistant.api_views import get_date_relation
+
     logger.info(f"🚀 Starting reserve_reception_for_patient with patient_id={patient_id}, "
                 f"date_from_patient={date_from_patient}, trigger_id={trigger_id}")
 

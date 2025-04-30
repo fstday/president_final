@@ -4,6 +4,9 @@ import logging
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
+from reminder.infoclinica_requests.schedule.schedule_cache import (
+    get_cached_schedule, cache_schedule, check_day_has_slots_from_cache
+)
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -413,7 +416,8 @@ def parse_doctor_schedule_response(xml_response):
 
 def check_day_has_free_slots(patient_code, date_str):
     """
-    Проверяет, есть ли свободные слоты на конкретный день
+    Проверяет, есть ли свободные слоты на конкретный день с использованием
+    кэширования результатов на 15 минут для всей недели.
 
     Args:
         patient_code: Код пациента
@@ -421,25 +425,31 @@ def check_day_has_free_slots(patient_code, date_str):
 
     Returns:
         dict: Информация о доступности слотов
-            - has_slots (bool): Есть ли свободные слоты
-            - doctor_code (str/int): Код врача, если найден
-            - department_id (str/int): ID отделения, если найдено
-            - clinic_id (str/int): ID клиники, если найдена
     """
     try:
-        # Преобразуем строку даты в объект datetime
-        if date_str == "today":
-            check_date = datetime.now()
-            date_str = check_date.strftime("%Y-%m-%d")
-        elif date_str == "tomorrow":
-            check_date = datetime.now() + timedelta(days=1)
-            date_str = check_date.strftime("%Y-%m-%d")
-        else:
-            check_date = datetime.strptime(date_str, "%Y-%m-%d")
+        # Сначала проверяем кэш для всей недели
+        cached_result = get_cached_schedule(patient_code)
 
-        # Получаем расписание
+        if cached_result:
+            logger.info(f"Используем кэшированные данные для проверки доступности слотов на {date_str}")
+            cache_check = check_day_has_slots_from_cache(patient_code, date_str, cached_result)
+
+            # Если в кэше есть данные о доступности, возвращаем их
+            if cache_check:
+                return cache_check
+
+        # Если кэша нет или он не содержит нужного дня, делаем запрос на всю неделю
+        logger.info(f"Выполняем запрос DOCT_SCHEDULE_FREE для пациента {patient_code} на 7 дней")
+
+        # Получаем расписание на всю неделю
         schedule_result = get_patient_doctor_schedule(patient_code, days_horizon=7)
 
+        # Кэшируем результат для всех последующих запросов (на 15 минут)
+        if schedule_result.get('success', False):
+            cache_schedule(patient_code, schedule_result)
+            logger.info(f"Результат запроса DOCT_SCHEDULE_FREE закэширован на 15 минут")
+
+        # Проверяем наличие слотов на указанную дату
         if not schedule_result.get('success', False):
             logger.error(f"Ошибка при получении графика: {schedule_result.get('error', 'Неизвестная ошибка')}")
             return {
@@ -452,7 +462,14 @@ def check_day_has_free_slots(patient_code, date_str):
         schedules = schedule_result.get('schedules', [])
 
         # Форматируем дату для поиска
-        search_date_iso = check_date.strftime("%Y-%m-%d")
+        if date_str == "today":
+            search_date = datetime.now().date()
+        elif date_str == "tomorrow":
+            search_date = (datetime.now() + timedelta(days=1)).date()
+        else:
+            search_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+        search_date_str = search_date.strftime("%Y-%m-%d")
 
         # Ищем слоты на указанную дату
         has_slots = False
@@ -463,7 +480,7 @@ def check_day_has_free_slots(patient_code, date_str):
         for slot in schedules:
             slot_date = slot.get('date_iso')
 
-            if slot_date == search_date_iso and slot.get('has_free_slots', False):
+            if slot_date == search_date_str and slot.get('has_free_slots', False):
                 has_slots = True
                 doctor_code = slot.get('doctor_code')
                 department_id = slot.get('department_id')

@@ -25,8 +25,6 @@ from django.views.decorators.http import require_http_methods
 from django.conf import settings
 from django.utils import timezone as django_timezone
 
-from reminder.check_for_nonworktime.extract_datetime import extract_date_from_input_chat_completion
-from reminder.check_for_nonworktime.is_non_working_time import is_non_working_time
 from reminder.infoclinica_requests.utils import format_doctor_name
 from reminder.models import Patient, Appointment, Assistant, Thread, Run, IgnoredPatient, AvailableTimeSlot
 from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
