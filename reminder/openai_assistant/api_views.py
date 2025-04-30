@@ -34,6 +34,7 @@ from reminder.openai_assistant.assistant_client import AssistantClient
 from reminder.openai_assistant.assistant_instructions import get_enhanced_assistant_prompt, \
     get_time_selection_instructions, get_enhanced_comprehensive_instructions
 from reminder.openai_assistant.helpers import check_if_time_selection_request, get_selected_time_slot
+from reminder.openai_assistant.redis_conversation_context_manager import ConversationContextManager
 from reminder.properties.utils import get_formatted_date_info
 
 logger = logging.getLogger(__name__)
@@ -321,14 +322,16 @@ def process_which_time_response(response_data, date_obj, patient_code, user_inpu
         return response
 
 
-def process_reserve_reception_response(response_data, date_obj, requested_time):
+def process_reserve_reception_response(response_data, date_obj, requested_time, user_input=""):
     """
     Processes and formats response from reserve_reception_for_patient function.
+    Enhanced to pass user context to the assistant for intelligent time selection.
 
     Args:
         response_data: Response data from reserve_reception_for_patient
         date_obj: Date object for appointment
         requested_time: Time requested by user
+        user_input: Original user request text for context analysis
 
     Returns:
         dict: Formatted response
@@ -433,8 +436,114 @@ def process_reserve_reception_response(response_data, date_obj, requested_time):
                     "data": response_data.get("message", "Ошибка изменения даты приема")
                 }
 
+            # Use an assistant to select the best time based on user context
+            selected_time = None
+            patient_id = response_data.get("patient_id", "")
+
+            if clean_times and patient_id and user_input:
+                try:
+                    # Create an assistant client specifically for time selection
+                    from openai import OpenAI
+                    from django.conf import settings
+                    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+                    # Create a prompt for time selection based on user context
+                    prompt = f"""
+                    На основе запроса пользователя: "{user_input}", 
+                    выберите наиболее подходящее время из доступных: {', '.join(clean_times)}.
+
+                    Анализируйте:
+                    1. Предпочтения по времени суток (утро/день/вечер)
+                    2. Любые конкретные временные ограничения
+                    3. По умолчанию выбирайте самое раннее время
+
+                    Утро: 09:00-11:59
+                    День: 12:00-15:59
+                    Вечер: 16:00-20:30
+
+                    Верните ТОЛЬКО выбранное время в формате ЧЧ:ММ
+                    """
+
+                    # Get assistant's recommendation
+                    response = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system",
+                             "content": "You are an appointment scheduling assistant that helps select the most appropriate time based on a user's request."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        max_tokens=20,
+                        temperature=0.3
+                    )
+
+                    # Extract the selected time
+                    if response.choices and len(response.choices) > 0:
+                        selected_time_raw = response.choices[0].message.content.strip()
+                        # Validate time format
+                        import re
+                        time_match = re.search(r'(\d{1,2}:\d{2})', selected_time_raw)
+                        if time_match:
+                            selected_time = time_match.group(1)
+                        else:
+                            # If assistant didn't return proper format, use first available
+                            selected_time = clean_times[0]
+                    else:
+                        # Fallback to first available time
+                        selected_time = clean_times[0]
+
+                    # Format date-time string for booking
+                    date_str = date_obj.strftime("%Y-%m-%d")
+                    selected_date_time = f"{date_str} {selected_time}"
+
+                    # Call reserve_reception_for_patient with selected time
+                    from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import \
+                        reserve_reception_for_patient
+                    booking_result = reserve_reception_for_patient(patient_id, selected_date_time, 1)
+
+                    # Process the booking result
+                    if hasattr(booking_result, 'content'):
+                        booking_result_dict = json.loads(booking_result.content.decode('utf-8'))
+                    else:
+                        booking_result_dict = booking_result
+
+                    # If booking successful, return success response
+                    if booking_result_dict.get("status") in ["success", "success_schedule",
+                                                             "success_change_reception"] or \
+                            booking_result_dict.get("status", "").startswith("success_change_reception"):
+
+                        success_status = "success_change_reception"
+                        if relation == "today":
+                            success_status = "success_change_reception_today"
+                        elif relation == "tomorrow":
+                            success_status = "success_change_reception_tomorrow"
+
+                        auto_book_response = {
+                            "status": success_status,
+                            "date": date_info["date"],
+                            "date_kz": date_info["date_kz"],
+                            "specialist_name": specialist_name,
+                            "weekday": date_info["weekday"],
+                            "weekday_kz": date_info["weekday_kz"],
+                            "time": selected_time,
+                            "auto_selected": True  # Flag that this was automatically selected
+                        }
+
+                        # Add day information if needed
+                        if relation == "today":
+                            auto_book_response["day"] = "сегодня"
+                            auto_book_response["day_kz"] = "бүгін"
+                        elif relation == "tomorrow":
+                            auto_book_response["day"] = "завтра"
+                            auto_book_response["day_kz"] = "ертең"
+
+                        return auto_book_response
+                except Exception as e:
+                    logger.error(f"Error during intelligent time selection: {e}")
+                    # Continue with standard processing if intelligent selection fails
+
+            # If auto-booking didn't work or wasn't attempted, return alternatives as usual
             # One alternative time
-            elif len(clean_times) == 1:
+            if len(clean_times) == 1:
                 status = "change_only_first_time"
                 if relation == "today":
                     status = "change_only_first_time_today"
@@ -588,7 +697,8 @@ def process_delete_reception_response(response_data):
 def process_voicebot_request(request):
     """
     Processes requests from the voice bot with improved handling for all edge cases
-    and enhanced contextual time selection.
+    and enhanced contextual time selection. Redis context storage ensures continuity
+    between requests, even when threads are lost.
     """
     try:
         # Validate authentication
@@ -607,6 +717,17 @@ def process_voicebot_request(request):
         user_input = data.get('user_input', '').strip()
         delete_keyword = data.get('delete_reception_keyword')
 
+        # Initialize Redis context manager for retrieving previous context
+        context_manager = ConversationContextManager()
+        # Get previous context if available
+        previous_context = context_manager.get_context(patient_code) or {}
+
+        # Extract key information from previous context
+        previous_date = previous_context.get('date')
+        previous_day = previous_context.get('day')
+        previous_times = previous_context.get('times', [])
+        previous_status = previous_context.get('status')
+
         # Проверка условия на безопасное удаление
         if delete_keyword == "ПАРОЛЬ ДЛЯ УДАЛЕНИЯ  azsf242ffgdf":
             try:
@@ -619,6 +740,10 @@ def process_voicebot_request(request):
                     result_dict = result
 
                 response = process_delete_reception_response(result_dict)
+
+                # Clear context after deletion
+                context_manager.delete_context(patient_code)
+
                 return JsonResponse(response)
 
             except Patient.DoesNotExist:
@@ -648,16 +773,6 @@ def process_voicebot_request(request):
             if hour < 9 or (hour == 20 and minute > 30) or hour > 20:
                 return JsonResponse({"status": "nonworktime"})
 
-        # now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # extracted = extract_date_from_input_chat_completion(user_input, current_datetime_str=now_str)
-        #
-        # if isinstance(extracted, dict) and "time" in extracted:
-        #     if is_non_working_time(extracted["time"]):
-        #         return JsonResponse({"status": "nonworktime"})
-        # else:
-        #     logging.error(f"❌ Некорректный ответ от extract_date_from_input: {extracted}")
-        #     return JsonResponse({"status": "bad_user_input", "message": "Невозможно извлечь время"})
-
         # Initialize context for the assistant
         additional_context = {}
 
@@ -665,6 +780,7 @@ def process_voicebot_request(request):
         try:
             today = datetime.now().strftime("%Y-%m-%d")
             tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            day_after_tomorrow = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
 
             # Fetch available slots for today
             today_result = which_time_in_certain_day(patient_code, today)
@@ -707,10 +823,87 @@ def process_voicebot_request(request):
                 except ValueError:
                     continue
 
-            # Check if this is a contextual time selection request
-            is_time_selection = check_if_time_selection_request(user_input, today_slots, tomorrow_slots)
+            # Check if this is a contextual time selection request based on previous context
+            if previous_times and any(marker in user_input.lower() for marker in
+                                      ["первое", "второе", "третье", "окошк", "первый", "второй", "третий"]):
+                # Get target date from previous context
+                target_date = None
+                if previous_day == "today":
+                    target_date = datetime.now().date()
+                elif previous_day == "tomorrow":
+                    target_date = (datetime.now() + timedelta(days=1)).date()
+                elif previous_date:
+                    # Try to parse date from previous context
+                    try:
+                        if "Января" in previous_date or "Февраля" in previous_date or any(
+                                month in previous_date for month in MONTHS_RU.values()):
+                            # Format like "29 Января" - extract day and month
+                            parts = previous_date.split()
+                            if len(parts) >= 2:
+                                day = int(parts[0])
+                                month_name = parts[1]
+
+                                # Find month number from name
+                                month_num = None
+                                for num, name in MONTHS_RU.items():
+                                    if name == month_name:
+                                        month_num = num
+                                        break
+
+                                if month_num:
+                                    # Create date using current year
+                                    year = datetime.now().year
+                                    target_date = datetime(year, month_num, day).date()
+                        else:
+                            # Try standard date format
+                            target_date = datetime.strptime(previous_date, "%Y-%m-%d").date()
+                    except Exception as e:
+                        logger.error(f"Error parsing previous date {previous_date}: {e}")
+
+                # Determine which time slot based on user's input
+                target_time = None
+                if "первое" in user_input.lower() or "первый" in user_input.lower() or "на первое" in user_input.lower():
+                    if len(previous_times) >= 1:
+                        target_time = previous_times[0]
+                elif "второе" in user_input.lower() or "второй" in user_input.lower() or "на второе" in user_input.lower():
+                    if len(previous_times) >= 2:
+                        target_time = previous_times[1]
+                elif "третье" in user_input.lower() or "третий" in user_input.lower() or "на третье" in user_input.lower():
+                    if len(previous_times) >= 3:
+                        target_time = previous_times[2]
+                elif "последн" in user_input.lower():
+                    if previous_times:
+                        target_time = previous_times[-1]
+
+                # If we have both target date and time, make the booking
+                if target_date and target_time:
+                    logger.info(f"Booking from previous context: date={target_date}, time={target_time}")
+                    date_str = target_date.strftime("%Y-%m-%d")
+                    datetime_str = f"{date_str} {target_time}"
+
+                    result = reserve_reception_for_patient(patient_code, datetime_str, 1)
+                    if hasattr(result, 'content'):
+                        result_dict = json.loads(result.content.decode('utf-8'))
+                    else:
+                        result_dict = result
+
+                    processed_result = process_reserve_reception_response(result_dict, target_date, target_time,
+                                                                          user_input)
+
+                    # Update context with new booking
+                    context_manager.update_context(patient_code, {
+                        'status': processed_result.get('status'),
+                        'date': date_str,
+                        'day': previous_day,
+                        'times': []  # Clear times after booking
+                    })
+
+                    return JsonResponse(processed_result)
+
+            # Original check using AI for time selection
+            is_time_selection = check_if_time_selection_request_ai(user_input, today_slots, tomorrow_slots)
             if is_time_selection:
-                target_date, target_time = get_selected_time_slot(user_input, today_slots, tomorrow_slots)
+                target_date, target_time = get_selected_time_slot_ai(user_input, today_slots, tomorrow_slots)
                 if target_date and target_time:
                     # Directly book the selected time
                     date_str = target_date.strftime("%Y-%m-%d")
@@ -722,7 +915,8 @@ def process_voicebot_request(request):
                     else:
                         result_dict = result
 
-                    processed_result = process_reserve_reception_response(result_dict, target_date, target_time)
+                    processed_result = process_reserve_reception_response(result_dict, target_date, target_time,
+                                                                          user_input)
                     return JsonResponse(processed_result)
 
         except Exception as slots_error:
@@ -730,254 +924,947 @@ def process_voicebot_request(request):
             additional_context["today_slots"] = []
             additional_context["tomorrow_slots"] = []
 
-        # Determine intent using NLP for better handling
-        intent = determine_user_intent(user_input, additional_context)
+        # Initialize assistant client
+        assistant_client = AssistantClient()
+        thread = assistant_client.get_or_create_thread(f"patient_{patient_code}", patient)
 
-        # Handle high-confidence intents directly for reliability
-        if intent.get('confidence', 0) > 0.8:
-            intent_type = intent.get('type')
+        # Add user message
+        assistant_client.add_message_to_thread(thread.thread_id, user_input)
 
-            # Handle available times requests
-            if intent_type == 'check_available_times':
-                try:
-                    date_obj = intent.get('date_obj', datetime.now())
-                    date_str = date_obj.strftime("%Y-%m-%d")
+        # Create request analysis instructions for the assistant
+        request_analysis_instructions = """
+        # АНАЛИЗ ЗАПРОСА ПОЛЬЗОВАТЕЛЯ
 
-                    result = which_time_in_certain_day(patient_code, date_str)
-                    if hasattr(result, 'content'):
-                        result_dict = json.loads(result.content.decode('utf-8'))
-                    else:
-                        result_dict = result
+        Проанализируй запрос пользователя и определи следующие параметры:
 
-                    processed_result = process_which_time_response(result_dict, date_obj, patient_code)
-                    return JsonResponse(processed_result)
-                except Exception as e:
-                    logger.error(f"Error processing check_available_times intent: {e}")
-                    fallback_response = create_meaningful_response(user_input, patient_code, additional_context)
-                    return JsonResponse(fallback_response)
+        1. Тип запроса:
+           - booking (запись/перенос)
+           - info (запрос информации о времени)
+           - cancel (отмена записи)
 
-            # Handle booking with specific time
-            elif intent_type == 'book_specific_time':
-                try:
-                    date_obj = intent.get('date_obj')
-                    time_str = intent.get('time_str')
+        2. Дата запроса:
+           - today (сегодня)
+           - tomorrow (завтра)
+           - day_after_tomorrow (послезавтра)
+           - near_future (ближайшие 2-3 дня)
+           - far_future (через неделю или больше)
+           - specific_date (конкретная дата)
 
-                    if date_obj and time_str:
-                        date_str = date_obj.strftime("%Y-%m-%d")
-                        datetime_str = f"{date_str} {time_str}"
+        3. Предпочтение по времени суток:
+           - morning (утро, 9:00-11:59)
+           - afternoon (день, 12:00-15:59)
+           - evening (вечер, 16:00-20:30)
+           - specific_time (конкретное время)
+           - any_time (любое время)
 
-                        result = reserve_reception_for_patient(patient_code, datetime_str, 1)
-                        if hasattr(result, 'content'):
-                            result_dict = json.loads(result.content.decode('utf-8'))
-                        else:
-                            result_dict = result
+        4. Если указано конкретное время, укажи его в формате HH:MM
 
-                        processed_result = process_reserve_reception_response(result_dict, date_obj, time_str)
-                        return JsonResponse(processed_result)
-                except Exception as e:
-                    logger.error(f"Error processing book_specific_time intent: {e}")
-                    fallback_response = create_meaningful_response(user_input, patient_code, additional_context)
-                    return JsonResponse(fallback_response)
+        5. Если указана конкретная дата, укажи её в формате YYYY-MM-DD
 
-            # Handle delete appointments
-            elif intent_type == 'delete_appointment':
-                try:
-                    result = delete_reception_for_patient(patient_code)
-                    if hasattr(result, 'content'):
-                        result_dict = json.loads(result.content.decode('utf-8'))
-                    else:
-                        result_dict = result
+        Верни результат в формате JSON без дополнительных комментариев:
+        ```json
+        {
+          "intent": "booking|info|cancel",
+          "date_type": "today|tomorrow|day_after_tomorrow|near_future|far_future|specific_date",
+          "specific_date": "YYYY-MM-DD или null",
+          "time_preference": "morning|afternoon|evening|specific_time|any_time",
+          "specific_time": "HH:MM или null"
+        }
+        ```
+        """
 
-                    processed_result = process_delete_reception_response(result_dict)
-                    return JsonResponse(processed_result)
-                except Exception as e:
-                    logger.error(f"Error processing delete_appointment intent: {e}")
-                    fallback_response = create_meaningful_response(user_input, patient_code, additional_context)
-                    return JsonResponse(fallback_response)
+        # Запрос к ассистенту для анализа намерения пользователя
+        analysis_thread = assistant_client.get_or_create_thread(f"analysis_{patient_code}", patient)
+        assistant_client.add_message_to_thread(analysis_thread.thread_id,
+                                               f"Запрос пользователя: '{user_input}'. Проанализируй и определи намерение, дату и предпочтение по времени.")
 
-        # For less certain intents or general requests, use the assistant with enhanced context
+        analysis_run = assistant_client.run_assistant(
+            analysis_thread,
+            patient,
+            instructions=request_analysis_instructions
+        )
+
+        # Ждем результат анализа
         try:
-            assistant_client = AssistantClient()
-            thread = assistant_client.get_or_create_thread(f"patient_{patient_code}", patient)
-
-            # Prepare available slots context for the prompt using the enhanced formatter
-            available_slots_context = format_available_slots_for_prompt(
-                patient,
-                datetime.now().date(),
-                (datetime.now() + timedelta(days=1)).date()
+            analysis_result = assistant_client.wait_for_run_completion(
+                analysis_thread.thread_id,
+                analysis_run.run_id,
+                timeout=5
             )
 
-            # Add user message
-            assistant_client.add_message_to_thread(thread.thread_id, user_input)
+            # Извлекаем результат анализа из ответа ассистента
+            analysis_messages = assistant_client.get_messages(analysis_thread.thread_id, limit=1)
+            analysis_data = extract_json_from_message(analysis_messages[0])
 
-            # Create comprehensive instructions without using string formatting
-            comprehensive_instructions = """
-            # МЕДИЦИНСКИЙ АССИСТЕНТ ДЛЯ УПРАВЛЕНИЯ ЗАПИСЯМИ НА ПРИЕМ
+            if not analysis_data:
+                analysis_data = {
+                    "intent": "info",  # По умолчанию считаем, что пользователь запрашивает информацию
+                    "date_type": "today",
+                    "specific_date": None,
+                    "time_preference": "any_time",
+                    "specific_time": None
+                }
 
-            ## ОСНОВНАЯ ЗАДАЧА
-            Ты AI-ассистент для системы управления медицинскими записями, интегрированной с Infoclinica и голосовым роботом ACS. 
-            Твоя главная цель - анализировать запросы пациентов на естественном языке, определять нужное действие, 
-            ВЫЗЫВАТЬ СООТВЕТСТВУЮЩУЮ ФУНКЦИЮ и форматировать ответ по требованиям системы.
+            logger.info(f"Анализ запроса: {analysis_data}")
 
-            ## РАБОЧИЕ ПАРАМЕТРЫ КЛИНИКИ
+        except Exception as analysis_error:
+            logger.error(f"Ошибка при анализе запроса: {analysis_error}")
+            analysis_data = {
+                "intent": "info",
+                "date_type": "today",
+                "specific_date": None,
+                "time_preference": "any_time",
+                "specific_time": None
+            }
 
-            - Рабочие часы клиники: с 09:00 до 20:30
-            - Если пациент предлагает записать на время, вне рабочих часов клиники - отдавай - "status": "nonworktime"
-            - Все записи с интервалом 30 минут (09:00, 09:30, 10:00...)
-            - Клиника работает без выходных
-            - Запись возможна только в пределах этих часов и с указанным шагом
+        # Определяем дату для запроса на основе анализа
+        request_date = get_date_from_analysis(analysis_data)
 
-            ## ОБРАБОТКА ЗАПРОСОВ НА НЕРАБОЧЕЕ ВРЕМЯ
+        # Проверяем, дальняя ли это дата (более 2 дней)
+        is_far_future = analysis_data.get("date_type") in ["far_future", "specific_date"]
+        if analysis_data.get("specific_date"):
+            try:
+                date_obj = datetime.strptime(analysis_data.get("specific_date"), "%Y-%m-%d")
+                today = datetime.now()
+                days_difference = (date_obj - today).days
+                is_far_future = days_difference > 2
+            except:
+                is_far_future = False
 
-            Если пациент просит записать его на время вне рабочих часов клиники (до 09:00 или после 20:30):
+        # Для каждого типа запроса выполняем соответствующие действия
 
-            1. СРАЗУ определи, что запрашиваемое время некорректно
-            2. НЕ делай запросы к функциям для этого времени
-            3. НЕМЕДЛЕННО верни ответ с "status": "nonworktime"
+        # 1. Для отмены записи
+        if analysis_data.get("intent") == "cancel":
+            result = delete_reception_for_patient(patient_code)
+            if hasattr(result, 'content'):
+                result_dict = json.loads(result.content.decode('utf-8'))
+            else:
+                result_dict = result
 
-            ПРИМЕРЫ:
-            - "Запишите на 10 ночи" (22:00) → Это вне рабочих часов → "status": "nonworktime"
-            - "Запишите в 7 утра" (07:00) → Это вне рабочих часов → "status": "nonworktime" 
-            - "Запишите на 21:00" → Это вне рабочих часов → "status": "nonworktime"
+            response = process_delete_reception_response(result_dict)
 
-            ## ПРАВИЛА ИНТЕРПРЕТАЦИИ ВРЕМЕНИ В ЗАПРОСАХ
+            # Clear context after deletion
+            context_manager.delete_context(patient_code)
 
-            1. При указании времени в запросе:
-               - "X утра" → ВСЕГДА ЭТО X:00 AM (Например: "10 утра" = 10:00)
-               - "X дня" → ВСЕГДА ЭТО X:00 PM, если X < 6 (Например: "3 дня" = 15:00)
-               - "X вечера" → ВСЕГДА ЭТО (X+12):00, если X ≤ 11 (Например: "8 вечера" = 20:00)
-               - "X ночи" → ВСЕГДА ЭТО (X+12):00, если X < 12 (Например: "10 ночи" = 22:00)
+            return JsonResponse(response)
 
-            2. Специальные случаи:
-               - "полдень", "в полдень" → 12:00
-               - "полночь", "в полночь" → 00:00 (вне рабочих часов)
-               - "после обеда" → Примерно 14:00-16:00
-               - "ночью", "ночью" без указания времени → Считать как вне рабочих часов
+        # 2. Для запроса информации о доступных временах
+        elif analysis_data.get("intent") == "info":
+            date_str = today
+            if analysis_data.get("date_type") == "tomorrow":
+                date_str = tomorrow
+            elif analysis_data.get("date_type") == "day_after_tomorrow":
+                date_str = day_after_tomorrow
+            elif analysis_data.get("specific_date"):
+                date_str = analysis_data.get("specific_date")
 
-            3. ВСЕГДА проверяй, попадает ли время в интервал 09:00-20:30:
-               - Если НЕТ → немедленно возвращай "status": "nonworktime"
-               - Если ДА → продолжай обработку запроса
+            result = which_time_in_certain_day(patient_code, date_str)
+            if hasattr(result, 'content'):
+                result_dict = json.loads(result.content.decode('utf-8'))
+            else:
+                result_dict = result
 
-            ## ДОСТУПНЫЕ ФУНКЦИИ И КОГДА ИХ ИСПОЛЬЗОВАТЬ
+            try:
+                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            except:
+                date_obj = datetime.now()
 
-            1. Свободные окошки → which_time_in_certain_day(patient_code, date_time)
-               Используй, когда пациент спрашивает о свободном времени на определенную дату
+            response = process_which_time_response(result_dict, date_obj, patient_code)
 
-            3. Запись/Перенос → reserve_reception_for_patient(patient_id, date_from_patient, trigger_id)
-               Используй, когда пациент хочет записаться на конкретное время или перенести запись
+            # Update context with shown times
+            times = []
+            for field in ["first_time", "second_time", "third_time"]:
+                if field in response and response[field]:
+                    times.append(response[field])
 
-            4. Отмена записи → delete_reception_for_patient(patient_id)
-               Используй, когда пациент хочет отменить запись
+            # Determine day type
+            day_type = None
+            if "today" in response.get("status", ""):
+                day_type = "today"
+            elif "tomorrow" in response.get("status", ""):
+                day_type = "tomorrow"
 
-            ## КОНТЕКСТУАЛЬНЫЙ ВЫБОР ВРЕМЕНИ
+            context_manager.update_context(patient_code, {
+                'status': response.get('status'),
+                'times': times,
+                'date': date_str,
+                'day': day_type
+            })
 
-            При выборе времени используй следующие правила:
+            return JsonResponse(response)
 
-            1. Порядковые ссылки:
-               - "первое время", "первый вариант" → выбирай первое время из списка
-               - "второе время", "второй вариант" → выбирай второе время из списка
-               - "третье время", "третий вариант" → выбирай третье время из списка
+        # 3. Для запроса на запись/перенос
+        elif analysis_data.get("intent") == "booking":
+            # Для ближних дат (сегодня, завтра, послезавтра) - выбираем время и делаем запись
+            if not is_far_future:
+                # Получаем доступные слоты
+                date_str = request_date.strftime("%Y-%m-%d")
+                available_slots_result = which_time_in_certain_day(patient_code, date_str)
 
-            2. Относительные ссылки:
-               - "самое раннее", "пораньше" → выбирай первое время из списка
-               - "самое позднее", "попозже" → выбирай последнее время из списка
-
-            3. Простое согласие:
-               - "да", "хорошо", "ок", "согласен" → выбирай первое время из списка
-
-            ## КРИТИЧЕСКИЕ ПРАВИЛА
-
-            1. ВСЕГДА вызывай соответствующую функцию вместо ответа текстом
-            2. При запросе на запись, ОБЯЗАТЕЛЬНО завершай процесс вызовом reserve_reception_for_patient
-            3. Используй только фиксированные значения времени для периодов дня (10:30 для утра, 13:30 для дня, 18:30 для вечера)
-            4. ОСОБЕННО ВАЖНО: Если запрос похож на выбор из ранее показанных времен (например, "первое время", "второй вариант"), 
-               обязательно выбери соответствующее время из доступных слотов и вызови reserve_reception_for_patient
-
-            "Короткие или неполные запросы (например, 'перенесите', 'какие свободные времена на', 'секс') — то отдавай статус - 'status': 'bad_user_input'."
-            "Если пользовательский ввод слишком короткий, обрывочный или непонятный (например, 'перенесите', 'перенесите на', 'перезапишите', 'перезапишите на', 'какие есть', 'свободные времена на', 'какие есть свободные', 'какие', 'что доступно сейчас', 'что доступно в', 'что доступно в', 'что доступно на', 'что можно выбрать', 'что можно записать', 'что можно', 'что доступно', 'что свободно', 'можно ли время в', 'можно ли время на', 'можно ли время на', 'можно ли время', 'возможно ли время на', 'возможно ли записаться', 'возможно ли записаться на', 'возможно ли записаться в', 'возможно ли в', 'в какой день можно', 'в какое время можно', 'на когда можно', 'на когда доступно', 'какое время есть', 'доступное время', 'свободное время', 'выбрать дату', 'выбрать день', 'выбрать время', 'перезаписать', 'перенести запись', 'перезаписать', 'подвинуть', 'подвинуть на', 'подвинуть запись', 'подвинуть запись на', 'сместить', 'сместить запись', 'сместить запись на', 'сместить запись на время', 'отодвинуть', 'отодвинуть на', 'отодвинуть запись', 'отодвинуть запись на', 'отодвинуть запись на время', 'сдвинуть', 'сдвинуть на', 'сдвинуть запись', 'сдвинуть запись на', 'сдвинуть запись на время', 'переместить', 'переместить на', 'переместить запись', 'переместить запись на время', 'поменять', 'поменять на', 'поменять запись', 'поменять запись на время', 'переставить', 'переставить на', 'переставить запись', 'переставить запись на время', 'переоформить', 'переоформить на', 'переоформить запись', 'переоформить запись на время', 'изменить', 'изменить запись', 'изменить на', 'изменить запись на время', 'переписать', 'переписать на', 'переписать запись', 'перезаписать запись на время', 'назначить заново', 'назначить заново на', 'назначить заново на время', 'назначить заново запись на время', 'пересмотреть', 'пересмотреть на', 'пересмотреть на', 'пересмотреть время', 'пересмотреть время на', 'пересмотреть время записи на', 'пересогласовать', 'пересогласовать на', 'пересогласовать время', 'пересогласовать запись', 'пересогласовать время записи на', 'переместить', 'переместить на', 'переместить запись', 'переместить запись', 'переместить время записи на', 'сместить', 'сместить на', 'сместить запись', 'сместить запись на', 'сместить время записи на', 'сдвинуть', 'сдвинуть на', 'сдвинуть запись', 'сдвинуть запись на', 'сдвинуть время записи на', 'отложить', 'отложить на', 'отложить запись', 'отложить запись на', 'отложить время записи на', 'подвинуть', 'подвинуть на', 'подвинуть запись', 'подвинуть запись на', 'подвинуть время записи на', 'отложить', 'отложить на', 'отложить запись', 'отложить запись на', 'отложить время записи на', 'назначить', 'назначить на', 'назначить запись', 'назначить запись на', 'назначить время записи на', 'а какие свободные времена'), возвращай 'status': 'bad_user_input'. "
-
-            "**Исключение**:"
-            "Фразы, содержащие слова 'раньше' или 'позже' (например, 'перенесите раньше', 'отодвиньте позже', 'подвиньте на раньше', 'сместите запись на позже') **не должны восприниматься как `bad_user_input`**. Вместо этого:"
-            "- Если фраза содержит 'раньше' — выбери ближайшее доступное время **до текущей записи**."
-            "- Если фраза содержит 'позже' — выбери ближайшее доступное время **после текущей записи**."
-
-            -  Рабочие часы клиники: с 09:00 до 20:30. Если пациент предлагает записать на время, вне рабочих часов клиники - отдавай - "status": "nonworktime"
-            """
-
-            # Add patient-specific and request-specific context
-            patient_specific_instructions = f"""
-            # ТЕКУЩИЙ КОНТЕКСТ
-
-            - ID пациента: {patient_code}
-            - Текущий запрос: "{user_input}"
-
-            # ДОСТУПНЫЕ ВРЕМЕННЫЕ СЛОТЫ
-
-            {available_slots_context}
-
-            ## РАБОЧИЕ ЧАСЫ КЛИНИКИ
-
-            Клиника работает с 09:00 до 20:30. Если пациент запрашивает время вне этого диапазона,
-            НЕОБХОДИМО вернуть статус "nonworktime" вместо предложения альтернативных времен.
-            """
-
-            # Combine instructions without string formatting
-            enhanced_comprehensive_instructions = get_enhanced_comprehensive_instructions(
-                user_input=user_input,
-                patient_code=patient_code,
-                thread_id=thread.thread_id,
-                assistant_client=assistant_client
-            )
-
-            final_instructions = (comprehensive_instructions +
-                                  patient_specific_instructions +
-                                  enhanced_comprehensive_instructions
-                                  )
-
-            # Run assistant with instructions
-            run = assistant_client.run_assistant(thread, patient, instructions=final_instructions)
-
-            # Wait for response with timeout
-            result = assistant_client.wait_for_run_completion(thread.thread_id, run.run_id, timeout=15)
-
-            # Validate the result to ensure it has a valid status
-            valid_statuses = [
-                "success_change_reception", "success_change_reception_today", "success_change_reception_tomorrow",
-                "error_change_reception", "error_change_reception_today", "error_change_reception_tomorrow",
-                "which_time", "which_time_today", "which_time_tomorrow",
-                "error_empty_windows", "error_empty_windows_today", "error_empty_windows_tomorrow",
-                "nonworktime", "error_med_element", "no_action_required",
-                "success_deleting_reception", "error_deleting_reception", "error_change_reception_bad_date",
-                "only_first_time_tomorrow", "only_first_time_today", "only_first_time",
-                "only_two_time_tomorrow", "only_two_time_today", "only_two_time",
-                "change_only_first_time_tomorrow", "change_only_first_time_today", "change_only_first_time",
-                "change_only_two_time_tomorrow", "change_only_two_time_today", "change_only_two_time",
-                "bad_user_input"
-            ]
-
-            # Analyze result and ensure it's properly formatted
-            if isinstance(result, dict) and "status" in result:
-                if result["status"] in valid_statuses:
-                    return JsonResponse(result)
+                if hasattr(available_slots_result, 'content'):
+                    available_slots_dict = json.loads(available_slots_result.content.decode('utf-8'))
                 else:
-                    # If status is not valid, use fallback
-                    logger.warning(f"Invalid status received from assistant: {result.get('status')}")
-                    fallback_response = create_meaningful_response(user_input, patient_code, additional_context)
-                    return JsonResponse(fallback_response)
+                    available_slots_dict = available_slots_result
 
-            # If no proper result, create a meaningful fallback response
-            logger.warning(f"Assistant did not return a valid response for user input: {user_input}")
-            fallback_response = create_meaningful_response(user_input, patient_code, additional_context)
-            return JsonResponse(fallback_response)
+                available_times = extract_available_times(available_slots_dict)
 
-        except Exception as assistant_error:
-            logger.error(f"Error using assistant: {assistant_error}", exc_info=True)
-            fallback_response = create_meaningful_response(user_input, patient_code, additional_context)
-            return JsonResponse(fallback_response)
+                if not available_times:
+                    # Нет доступных времен
+                    return JsonResponse({
+                        "status": "error_empty_windows",
+                        "message": f"На {date_str} нет доступных времен для записи"
+                    })
+
+                # Используем ассистента для выбора подходящего времени из доступных
+                time_selection_prompt = f"""
+                На основе запроса пользователя: "{user_input}"
+                выбери наиболее подходящее время из доступных: {available_times}
+
+                ВАЖНЫЙ КОНТЕКСТ:
+                {f"В предыдущем ответе пользователю были показаны: {previous_times}" if previous_times else ""}
+                {f"Предыдущий контекст содержал дату: {previous_date}" if previous_date else ""}
+                {f"Предыдущий статус ответа: {previous_status}" if previous_status else ""}
+
+                Определи из запроса пользователя, какое время суток он предпочитает:
+                - Утро (9:00-11:59)
+                - День (12:00-15:59)
+                - Вечер (16:00-20:30)
+
+                Если в запросе указано конкретное время, выбери ближайшее к нему из доступных.
+                Если в запросе указано время суток (утро/день/вечер), выбери подходящее из этого периода.
+                Если нет прямого указания на время, выбери самое раннее доступное.
+
+                Верни ТОЛЬКО выбранное время в формате ЧЧ:ММ без каких-либо пояснений.
+                """
+
+                time_selection_thread = assistant_client.get_or_create_thread(f"time_selection_{patient_code}", patient)
+                assistant_client.add_message_to_thread(time_selection_thread.thread_id, time_selection_prompt)
+
+                time_selection_run = assistant_client.run_assistant(
+                    time_selection_thread,
+                    patient,
+                    instructions="Выбери наиболее подходящее время из списка доступных. Верни только время в формате ЧЧ:ММ."
+                )
+
+                # Получаем выбранное время от ассистента
+                selected_time = None
+                try:
+                    selection_result = assistant_client.wait_for_run_completion(
+                        time_selection_thread.thread_id,
+                        time_selection_run.run_id,
+                        timeout=5
+                    )
+
+                    selection_messages = assistant_client.get_messages(time_selection_thread.thread_id, limit=1)
+                    if selection_messages:
+                        time_text = extract_text_content(selection_messages[0])
+                        time_match = re.search(r'(\d{1,2}):(\d{2})', time_text)
+                        if time_match:
+                            selected_time = f"{int(time_match.group(1)):02d}:{time_match.group(2)}"
+                except Exception as selection_error:
+                    logger.error(f"Ошибка при выборе времени: {selection_error}")
+
+                # Если не удалось получить время от ассистента, используем первое доступное
+                if not selected_time and available_times:
+                    selected_time = available_times[0]
+
+                if selected_time:
+                    # Делаем запись на выбранное время
+                    datetime_str = f"{date_str} {selected_time}"
+                    booking_result = reserve_reception_for_patient(patient_code, datetime_str, 1)
+
+                    if hasattr(booking_result, 'content'):
+                        booking_result_dict = json.loads(booking_result.content.decode('utf-8'))
+                    else:
+                        booking_result_dict = booking_result
+
+                    processed_result = process_reserve_reception_response(
+                        booking_result_dict,
+                        request_date,
+                        selected_time,
+                        user_input
+                    )
+
+                    # Update context with booking info
+                    day_type = None
+                    if "today" in processed_result.get("status", ""):
+                        day_type = "today"
+                    elif "tomorrow" in processed_result.get("status", ""):
+                        day_type = "tomorrow"
+
+                    context_manager.update_context(patient_code, {
+                        'status': processed_result.get('status'),
+                        'date': date_str,
+                        'day': day_type,
+                        'booked_time': selected_time,
+                        'times': []  # Clear times after booking
+                    })
+
+                    return JsonResponse(processed_result)
+
+            # Для дальних дат (более 2 дней) - только показываем доступные времена
+            else:
+                date_str = request_date.strftime("%Y-%m-%d")
+                result = which_time_in_certain_day(patient_code, date_str)
+
+                if hasattr(result, 'content'):
+                    result_dict = json.loads(result.content.decode('utf-8'))
+                else:
+                    result_dict = result
+
+                response = process_which_time_response(result_dict, request_date, patient_code)
+
+                # Update context with shown times
+                times = []
+                for field in ["first_time", "second_time", "third_time"]:
+                    if field in response and response[field]:
+                        times.append(response[field])
+
+                # Determine day type
+                day_type = None
+                if date_str == today:
+                    day_type = "today"
+                elif date_str == tomorrow:
+                    day_type = "tomorrow"
+
+                context_manager.update_context(patient_code, {
+                    'status': response.get('status'),
+                    'times': times,
+                    'date': date_str,
+                    'day': day_type
+                })
+
+                return JsonResponse(response)
+
+        # Create context-enhanced instructions with previous interaction data
+        context_instructions = """
+        # КРИТИЧЕСКИ ВАЖНАЯ ИНФОРМАЦИЯ О ПРЕДЫДУЩЕМ КОНТЕКСТЕ
+        """
+
+        if previous_times:
+            context_instructions += f"""
+            ## В предыдущем ответе пользователю были показаны следующие времена:
+            """
+
+            # Add each time with its ordinal position for clarity
+            for i, time in enumerate(previous_times):
+                position = "первое" if i == 0 else "второе" if i == 1 else "третье" if i == 2 else f"{i + 1}-е"
+                context_instructions += f"""
+                {position} время: {time}
+                """
+
+            context_instructions += f"""
+
+            ## ПРАВИЛА ОБРАБОТКИ ССЫЛОК НА ПРЕДЫДУЩИЕ ВРЕМЕНА:
+
+            КРИТИЧЕСКИ ВАЖНО: Если пользователь ссылается на времена из предыдущего контекста:
+
+            1. Если пользователь говорит "первое время", "первый вариант", "на первое", "первое" → ему нужно записаться на {previous_times[0] if len(previous_times) > 0 else '(нет данных)'}
+            2. Если пользователь говорит "второе время", "второй вариант", "на второе", "второе" → ему нужно записаться на {previous_times[1] if len(previous_times) > 1 else '(нет данных)'}
+            3. Если пользователь говорит "третье время", "третий вариант", "на третье", "третье" → ему нужно записаться на {previous_times[2] if len(previous_times) > 2 else '(нет данных)'}
+            4. Если пользователь пишет что-то вроде "а давай на первое окошко" → ему нужно записаться на {previous_times[0] if len(previous_times) > 0 else '(нет данных)'}
+
+            ВАЖНО: Если в запросе пользователя упоминается "первое", "второе", "третье" время, или "окошко" - это ВСЕГДА ссылка на времена, показанные в предыдущем ответе.
+            """
+
+        if previous_date or previous_day:
+            context_instructions += f"""
+
+            ## КРИТИЧЕСКИ ВАЖНО: Информация о дате из предыдущего контекста:
+
+            Дата: {previous_date or "Не указана"}
+            День: {previous_day or "Не указан"}
+
+            КРИТИЧЕСКИ ВАЖНО: Используй именно ту ДАТУ, которая была в предыдущем ответе.
+            НЕ используй текущую дату, если в предыдущем ответе была другая дата!
+            """
+
+        # Обработка прочих запросов через общий механизм ассистента
+        comprehensive_instructions = get_enhanced_comprehensive_instructions(
+            user_input=user_input,
+            patient_code=patient_code,
+            thread_id=thread.thread_id,
+            assistant_client=assistant_client
+        )
+
+        # Добавляем информацию о доступных слотах
+        available_slots_context = format_available_slots_for_prompt(
+            patient,
+            datetime.now().date(),
+            (datetime.now() + timedelta(days=1)).date()
+        )
+
+        # Добавляем инструкции о различии между ближними и дальними датами
+        date_booking_instructions = """
+        ## ПРАВИЛА БРОНИРОВАНИЯ В ЗАВИСИМОСТИ ОТ ДАТЫ
+
+        ### 1. ДЛЯ БЛИЖНИХ ДАТ (СЕГОДНЯ, ЗАВТРА, ПОСЛЕЗАВТРА):
+
+        Для записи на сегодня, завтра или послезавтра:
+
+        1. СНАЧАЛА вызови which_time_in_certain_day для получения доступных времен
+        2. ВНИМАТЕЛЬНО ИЗУЧИ полученный список доступных времен
+        3. ВЫБЕРИ время из списка доступных времен, которое наиболее соответствует запросу пользователя
+        4. ВЫЗОВИ reserve_reception_for_patient только с временем из списка доступных
+
+        ### 2. ДЛЯ ДАЛЬНИХ ДАТ (БОЛЕЕ ЧЕМ ЧЕРЕЗ 2 ДНЯ):
+
+        Для записи на даты далее чем послезавтра:
+
+        1. Вызови which_time_in_certain_day для получения доступных времен
+        2. НЕ ВЫЗЫВАЙ reserve_reception_for_patient автоматически
+        3. ОСТАНОВИСЬ после получения списка времен
+        4. Верни ответ со статусом which_time для показа пользователю
+        """
+
+        # Объединяем все инструкции
+        final_instructions = (comprehensive_instructions + "\n\n" +
+                              context_instructions + "\n\n" +
+                              date_booking_instructions + "\n\n" +
+                              available_slots_context)
+
+        # Запускаем ассистента
+        run = assistant_client.run_assistant(thread, patient, instructions=final_instructions)
+
+        # Ждем ответ
+        result = assistant_client.wait_for_run_completion(thread.thread_id, run.run_id, timeout=15)
+
+        # Проверяем валидность результата
+        valid_statuses = [
+            "success_change_reception", "success_change_reception_today", "success_change_reception_tomorrow",
+            "error_change_reception", "error_change_reception_today", "error_change_reception_tomorrow",
+            "which_time", "which_time_today", "which_time_tomorrow",
+            "error_empty_windows", "error_empty_windows_today", "error_empty_windows_tomorrow",
+            "nonworktime", "error_med_element", "no_action_required",
+            "success_deleting_reception", "error_deleting_reception", "error_change_reception_bad_date",
+            "only_first_time_tomorrow", "only_first_time_today", "only_first_time",
+            "only_two_time_tomorrow", "only_two_time_today", "only_two_time",
+            "change_only_first_time_tomorrow", "change_only_first_time_today", "change_only_first_time",
+            "change_only_two_time_tomorrow", "change_only_two_time_today", "change_only_two_time",
+            "bad_user_input"
+        ]
+
+        if isinstance(result, dict) and "status" in result:
+            if result["status"] in valid_statuses:
+                # Update context from result
+                times = []
+                for field in ["first_time", "second_time", "third_time"]:
+                    if field in result and result[field]:
+                        times.append(result[field])
+
+                day_type = None
+                if "today" in result.get("status", ""):
+                    day_type = "today"
+                elif "tomorrow" in result.get("status", ""):
+                    day_type = "tomorrow"
+
+                # Get date from result if available
+                result_date = None
+                if "date" in result:
+                    # Try to parse date from Russian format to YYYY-MM-DD
+                    try:
+                        date_parts = result["date"].split()
+                        if len(date_parts) >= 2:
+                            day = int(date_parts[0])
+                            month_name = date_parts[1]
+
+                            month_num = None
+                            for num, name in MONTHS_RU.items():
+                                if name == month_name:
+                                    month_num = num
+                                    break
+
+                            if month_num:
+                                year = datetime.now().year
+                                result_date = datetime(year, month_num, day).strftime("%Y-%m-%d")
+                    except Exception as e:
+                        logger.error(f"Error parsing date from result: {e}")
+
+                # Update Redis context
+                context_data = {
+                    'status': result.get('status'),
+                    'times': times
+                }
+
+                if day_type:
+                    context_data['day'] = day_type
+
+                if result_date:
+                    context_data['date'] = result_date
+
+                context_manager.update_context(patient_code, context_data)
+
+                return JsonResponse(result)
+            else:
+                logger.warning(f"Invalid status received from assistant: {result.get('status')}")
+                fallback_response = create_meaningful_response(user_input, patient_code, additional_context)
+                return JsonResponse(fallback_response)
+
+        # Если не получен валидный результат
+        logger.warning(f"Assistant did not return a valid response for user input: {user_input}")
+        fallback_response = create_meaningful_response(user_input, patient_code, additional_context)
+        return JsonResponse(fallback_response)
 
     except Exception as e:
         logger.error(f"Error processing request: {e}", exc_info=True)
         return JsonResponse({'status': 'bad_user_input'})
+
+
+def extract_json_from_message(message):
+    """
+    Extracts JSON data from assistant message.
+
+    Args:
+        message: Message object from assistant
+
+    Returns:
+        dict: Extracted JSON data or None
+    """
+    try:
+        if not message or not hasattr(message, 'content'):
+            return None
+
+        content_text = ""
+        for content_item in message.content:
+            if hasattr(content_item, 'text') and content_item.text:
+                content_text += content_item.text.value
+
+        # Look for JSON in backticks
+        json_match = re.search(r'```(?:json)?\s*({[\s\S]*?})\s*```', content_text)
+        if json_match:
+            json_str = json_match.group(1)
+            return json.loads(json_str)
+
+        # If no JSON in backticks, try to find JSON anywhere in the text
+        json_match = re.search(r'({[\s\S]*})', content_text)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except:
+                pass
+
+        return None
+    except Exception as e:
+        logger.error(f"Error extracting JSON from message: {e}")
+        return None
+
+
+def extract_text_content(message):
+    """
+    Extracts plain text from assistant message.
+
+    Args:
+        message: Message object from assistant
+
+    Returns:
+        str: Extracted text
+    """
+    try:
+        if not message or not hasattr(message, 'content'):
+            return ""
+
+        content_text = ""
+        for content_item in message.content:
+            if hasattr(content_item, 'text') and content_item.text:
+                content_text += content_item.text.value
+
+        return content_text
+    except Exception as e:
+        logger.error(f"Error extracting text content: {e}")
+        return ""
+
+
+def get_date_from_analysis(analysis_data):
+    """
+    Gets date object from analysis data.
+
+    Args:
+        analysis_data: Analysis data from assistant
+
+    Returns:
+        datetime: Date object
+    """
+    try:
+        today = datetime.now()
+
+        if analysis_data.get("date_type") == "tomorrow":
+            return today + timedelta(days=1)
+        elif analysis_data.get("date_type") == "day_after_tomorrow":
+            return today + timedelta(days=2)
+        elif analysis_data.get("date_type") == "specific_date" and analysis_data.get("specific_date"):
+            try:
+                return datetime.strptime(analysis_data.get("specific_date"), "%Y-%m-%d")
+            except:
+                return today
+        elif analysis_data.get("date_type") == "far_future":
+            # По умолчанию через неделю
+            return today + timedelta(days=7)
+        else:
+            return today
+    except Exception as e:
+        logger.error(f"Error getting date from analysis: {e}")
+        return datetime.now()
+
+
+def check_if_time_selection_request_ai(user_input, today_slots, tomorrow_slots):
+    """
+    Uses AI to determine if this is a request to select a time from previously displayed options.
+
+    Args:
+        user_input: User's input text
+        today_slots: Available slots for today
+        tomorrow_slots: Available slots for tomorrow
+
+    Returns:
+        bool: True if time selection request, False otherwise
+    """
+    try:
+        # Prepare context for assistant
+        context = {
+            "user_input": user_input,
+            "today_slots": today_slots,
+            "tomorrow_slots": tomorrow_slots,
+        }
+
+        # Create prompt for assistant
+        prompt = f"""
+        На основе запроса пользователя: "{user_input}"
+        и доступных времен:
+
+        Сегодня: {', '.join(today_slots) if today_slots else "нет доступных времен"}
+        Завтра: {', '.join(tomorrow_slots) if tomorrow_slots else "нет доступных времен"}
+
+        Определи, выбирает ли пользователь одно из ранее предложенных времен.
+        Пользователь выбирает время, если упоминает:
+        - Порядковый номер ("первое время", "второй вариант", "третье")
+        - Относительное положение ("самое раннее", "последнее")
+        - Конкретное время из списка доступных
+        - Фразы согласия после показа вариантов ("да", "хорошо", "подойдет")
+
+        Верни только "true" или "false" без дополнительных пояснений.
+        """
+
+        from openai import OpenAI
+        from django.conf import settings
+        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system",
+                 "content": "You are an assistant that determines if a user is selecting a time from previously shown options."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=10,
+            temperature=0
+        )
+
+        response_text = response.choices[0].message.content.strip().lower()
+        return "true" in response_text
+
+    except Exception as e:
+        logger.error(f"Error in check_if_time_selection_request_ai: {e}")
+        # Fall back to static rules
+        return check_if_time_selection_request(user_input, today_slots, tomorrow_slots)
+
+
+def get_selected_time_slot_ai(user_input, today_slots, tomorrow_slots):
+    """
+    Uses AI to determine which time slot and day the user is selecting.
+
+    Args:
+        user_input: User's input text
+        today_slots: Available slots for today
+        tomorrow_slots: Available slots for tomorrow
+
+    Returns:
+        tuple: (date_obj, time_str) selected by the user, or (None, None) if unable to determine
+    """
+    try:
+        # Prepare context for assistant
+        today = datetime.now().date()
+        tomorrow = today + timedelta(days=1)
+
+        # Create prompt for assistant
+        prompt = f"""
+        На основе запроса пользователя: "{user_input}"
+        и доступных времен:
+
+        Сегодня ({today.strftime('%d.%m.%Y')}): {', '.join(today_slots) if today_slots else "нет доступных времен"}
+        Завтра ({tomorrow.strftime('%d.%m.%Y')}): {', '.join(tomorrow_slots) if tomorrow_slots else "нет доступных времен"}
+
+        Определи, какое время и день выбирает пользователь.
+
+        Если пользователь упоминает "первое", "первый вариант" и т.п. - он выбирает первое время из списка.
+        Если "второе", "второй" - второе время из списка.
+        Если "третье", "третий" - третье время из списка.
+        Если "последнее" - последнее время из списка.
+
+        Если пользователь прямо упоминает день (сегодня/завтра), используй слоты для этого дня.
+        Если пользователь не указывает день, используй сегодняшние слоты по умолчанию.
+
+        Если пользователь упоминает конкретное время (например, "14:30"), проверь, есть ли оно в доступных слотах.
+
+        Верни ответ в формате JSON:
+        ```json
+        {
+        "day": "today|tomorrow",
+          "time": "HH:MM"
+        }
+        ```
+
+        Если невозможно определить время, верни null вместо времени.
+        """
+
+        from openai import OpenAI
+        from django.conf import settings
+        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system",
+                 "content": "You are an assistant that determines which time slot a user is selecting from available options."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=100,
+            temperature=0
+        )
+
+        response_text = response.choices[0].message.content
+
+        # Extract JSON from response
+        json_match = re.search(r'```(?:json)?\s*({[\s\S]*?})\s*```', response_text)
+        if json_match:
+            selection = json.loads(json_match.group(1))
+            day = selection.get("day")
+            time = selection.get("time")
+
+            if time:
+                if day == "today":
+                    return datetime.now().date(), time
+                elif day == "tomorrow":
+                    return (datetime.now() + timedelta(days=1)).date(), time
+
+        # Fall back to static rules if AI selection fails
+        return get_selected_time_slot(user_input, today_slots, tomorrow_slots)
+
+    except Exception as e:
+        logger.error(f"Error in get_selected_time_slot_ai: {e}")
+        # Fall back to static rules
+        return get_selected_time_slot(user_input, today_slots, tomorrow_slots)
+
+
+def extract_date_from_request(user_input):
+    """
+    Extracts date from user request, handling relative date references.
+
+    Args:
+        user_input: User's input text
+
+    Returns:
+        datetime or None: Extracted date or None if not found
+    """
+    user_input = user_input.lower()
+
+    # Check for today/tomorrow/day after tomorrow
+    if "сегодня" in user_input:
+        return datetime.now()
+    elif "завтра" in user_input:
+        return datetime.now() + timedelta(days=1)
+    elif "послезавтра" in user_input or "после завтра" in user_input:
+        return datetime.now() + timedelta(days=2)
+
+    # Check for "через X дней/недель/месяцев"
+    through_match = re.search(r'через (\d+) (дн[еяй]|недел[юьи]|месяц[еа]в?)', user_input)
+    if through_match:
+        amount = int(through_match.group(1))
+        period = through_match.group(2)
+
+        if period.startswith("дн"):
+            return datetime.now() + timedelta(days=amount)
+        elif period.startswith("недел"):
+            return datetime.now() + timedelta(days=amount * 7)
+        elif period.startswith("месяц"):
+            return datetime.now() + timedelta(days=amount * 30)
+
+    # Check for specific date formats (DD.MM, etc.)
+    date_patterns = [
+        r'(\d{1,2})[\.\/](\d{1,2})',  # DD.MM or DD/MM
+        r'(\d{1,2}) (января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)'
+    ]
+
+    for pattern in date_patterns:
+        date_match = re.search(pattern, user_input)
+        if date_match:
+            try:
+                if '.' in pattern or '/' in pattern:
+                    day = int(date_match.group(1))
+                    month = int(date_match.group(2))
+                    year = datetime.now().year
+                    return datetime(year, month, day)
+                else:
+                    # Handle month names
+                    day = int(date_match.group(1))
+                    month_name = date_match.group(2)
+                    month_map = {
+                        "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
+                        "мая": 5, "июня": 6, "июля": 7, "августа": 8,
+                        "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12
+                    }
+                    month = month_map.get(month_name.lower())
+                    if month:
+                        year = datetime.now().year
+                        return datetime(year, month, day)
+            except (ValueError, TypeError):
+                pass
+
+    return None
+
+
+def is_date_near_term(date_obj):
+    """
+    Determines if a date is near-term (today, tomorrow, or day after).
+
+    Args:
+        date_obj: Date object to check
+
+    Returns:
+        bool: True if near-term, False otherwise
+    """
+    if not date_obj:
+        return True  # Default to near-term if no date specified
+
+    today = datetime.now().date()
+
+    if isinstance(date_obj, datetime):
+        date_obj = date_obj.date()
+
+    delta = (date_obj - today).days
+
+    return 0 <= delta <= 2  # Today, tomorrow, or day after tomorrow
+
+
+def has_booking_intent(user_input):
+    """
+    Determines if user intends to book (not just check times).
+
+    Args:
+        user_input: User's input text
+
+    Returns:
+        bool: True if booking intent detected, False otherwise
+    """
+    user_input = user_input.lower()
+    booking_indicators = [
+        "запиш", "записать", "запись",
+        "забронир", "бронир",
+        "назнач", "оформ",
+        "перенес", "перенести",
+        "регистр", "поставь", "поставьте",
+        "хочу на", "нужно на"
+    ]
+
+    return any(term in user_input for term in booking_indicators)
+
+
+def select_appropriate_time_from_available(user_input, available_times):
+    """
+    Selects the most appropriate time from available slots based on user context.
+
+    Args:
+        user_input: User's input text
+        available_times: List of available time slots
+
+    Returns:
+        str: Selected time or None if no appropriate time found
+    """
+    if not available_times:
+        return None
+
+    user_input = user_input.lower()
+
+    # Sort available times
+    available_times.sort()
+
+    # Check for time of day preference
+    is_morning = any(term in user_input for term in ["утр", "утром", "с утра", "пораньше", "рано"])
+    is_afternoon = any(term in user_input for term in ["обед", "днем", "днём", "полдень"])
+    is_evening = any(term in user_input for term in ["вечер", "вечером", "ужин", "поздно", "попозже"])
+
+    # Filter by time of day
+    morning_times = [t for t in available_times if t < "12:00"]
+    afternoon_times = [t for t in available_times if "12:00" <= t < "16:00"]
+    evening_times = [t for t in available_times if t >= "16:00"]
+
+    # Standard times for different parts of day
+    standard_morning = "10:30"
+    standard_afternoon = "13:30"
+    standard_evening = "18:30"
+
+    # Select based on preference
+    if is_morning and morning_times:
+        # Try to find standard morning time
+        if standard_morning in morning_times:
+            return standard_morning
+        # Otherwise return first morning time
+        return morning_times[0]
+
+    elif is_afternoon and afternoon_times:
+        # Try to find standard afternoon time
+        if standard_afternoon in afternoon_times:
+            return standard_afternoon
+        # Otherwise return first afternoon time
+        return afternoon_times[0]
+
+    elif is_evening and evening_times:
+        # Try to find standard evening time
+        if standard_evening in evening_times:
+            return standard_evening
+        # Otherwise return first evening time
+        return evening_times[0]
+
+    # If no specific preference or no times in preferred period,
+    # try to find a standard time in any period
+    standard_times = [standard_morning, standard_afternoon, standard_evening]
+    for time in standard_times:
+        if time in available_times:
+            return time
+
+    # Default to first available time
+    return available_times[0]
+
+
+def extract_date_from_formatted_text(formatted_date):
+    """
+    Extracts a datetime object from formatted date text like "29 Января".
+
+    Args:
+        formatted_date: Formatted date string
+
+    Returns:
+        datetime: Extracted date
+    """
+    try:
+        parts = formatted_date.split()
+        if len(parts) != 2:
+            return datetime.now()
+
+        day = int(parts[0])
+        month_name = parts[1]
+
+        month_map = {
+            "Января": 1, "Февраля": 2, "Марта": 3, "Апреля": 4,
+            "Мая": 5, "Июня": 6, "Июля": 7, "Августа": 8,
+            "Сентября": 9, "Октября": 10, "Ноября": 11, "Декабря": 12
+        }
+
+        month = month_map.get(month_name, 1)
+        year = datetime.now().year
+
+        return datetime(year, month, day)
+    except:
+        return datetime.now()
 
 
 def determine_user_intent(user_input, context=None):

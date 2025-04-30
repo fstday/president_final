@@ -84,9 +84,11 @@ class AssistantClient:
         self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
     def get_or_create_thread(self, thread_identifier, entity):
-        """Улучшенная функция для получения или создания треда"""
+        """
+        Improved function that ensures consistent thread usage for the same patient.
+        """
         try:
-            # Проверяем, существует ли активный тред с этим идентификатором
+            # Look for an active thread with this identifier
             existing_thread = Thread.objects.filter(
                 order_key=str(thread_identifier),
                 expires_at__gt=timezone.now()
@@ -95,12 +97,7 @@ class AssistantClient:
             if existing_thread:
                 logger.info(f"Найден существующий тред {existing_thread.thread_id} для {thread_identifier}")
 
-                # Проверьте, не истек ли срок действия треда
-                if existing_thread.is_expired():
-                    logger.warning(f"Тред {existing_thread.thread_id} истек, создаем новый")
-                    return self._create_fresh_thread(entity)
-
-                # Проверьте, нет ли активного запуска, который может блокировать новые сообщения
+                # Check for active runs that could block new messages
                 try:
                     runs = self.client.beta.threads.runs.list(
                         thread_id=existing_thread.thread_id,
@@ -109,25 +106,29 @@ class AssistantClient:
 
                     if runs.data and runs.data[0].status in ["in_progress", "queued", "requires_action"]:
                         logger.warning(f"Тред {existing_thread.thread_id} имеет активный запуск, отменяем его")
-                        self.client.beta.threads.runs.cancel(
-                            thread_id=existing_thread.thread_id,
-                            run_id=runs.data[0].id
-                        )
-                except Exception as e:
-                    logger.error(f"Ошибка при проверке запусков: {e}")
+                        try:
+                            self.client.beta.threads.runs.cancel(
+                                thread_id=existing_thread.thread_id,
+                                run_id=runs.data[0].id
+                            )
+                        except Exception as cancel_error:
+                            logger.error(f"Ошибка при отмене запуска: {cancel_error}")
+                            # Even if cancellation fails, continue with the existing thread
+                except Exception as run_check_error:
+                    logger.error(f"Ошибка при проверке запусков: {run_check_error}")
 
-                # Обновляем срок действия треда
+                # Update thread expiration
                 existing_thread.expires_at = timezone.now() + timedelta(hours=24)
                 existing_thread.save()
 
                 return existing_thread
 
-            # Если тред не найден, создаем новый
+            # If no thread found, create a new one
             return self._create_fresh_thread(entity)
 
         except Exception as e:
             logger.error(f"Ошибка в get_or_create_thread: {e}", exc_info=True)
-            # В случае ошибки, создаем новый тред
+            # If an error occurs, create a new thread
             return self._create_fresh_thread(entity)
 
     def _create_fresh_thread(self, entity):
@@ -251,141 +252,24 @@ class AssistantClient:
 
     def run_assistant(self, thread, entity, instructions=None):
         """
-        Запускает ассистента с правильными инструкциями для обеспечения сохранения контекста.
-        Улучшенная версия с дополнительным контекстом о предыдущих временах.
-
-        Args:
-            thread: Thread object
-            entity: Either Appointment object or Patient object
-            instructions: Additional instructions to enforce function calling
-
-        Returns:
-            RunModel: Run model object
+        Запускает ассистента с улучшенной обработкой контекста.
         """
         try:
-            # Сначала проверяем, имеет ли этот тред уже активный запуск
-            runs = self.client.beta.threads.runs.list(
-                thread_id=thread.thread_id,
-                limit=1
-            )
+            # Get thread ID
+            thread_id = thread.thread_id
 
-            # Если есть активный запуск, создаем новый тред
-            if runs.data and runs.data[0].status in ["in_progress", "queued", "requires_action"]:
-                logger.warning(f"Тред {thread.thread_id} уже имеет активный запуск. Создаем новый тред.")
-
-                # Создаем новый тред
-                new_thread = self._create_fresh_thread(entity)
-
-                # Обновляем исходный объект Thread
-                thread.thread_id = new_thread.thread_id
-                thread.save()
-
-                # Продолжаем с новым ID треда
-                thread_id = new_thread.thread_id
-            else:
-                thread_id = thread.thread_id
-
-            # Определяем, работаем ли мы с записью или напрямую с пациентом
-            is_appointment = isinstance(entity, Appointment)
-
-            if is_appointment:
-                # Получаем данные пациента и записи из объекта записи
-                appointment = entity
-                patient = appointment.patient
-                patient_code = patient.patient_code
-
-                # Форматируем время записи
-                appointment_time = "Не указано"
-                if appointment.start_time:
-                    appointment_time = appointment.start_time.strftime("%Y-%m-%d %H:%M")
-
-                # Получаем имя врача
-                doctor_name = "Не указан"
-                if appointment.doctor:
-                    doctor_name = appointment.doctor.full_name
-
-                # Получаем название клиники
-                clinic_name = "Не указана"
-                if appointment.clinic:
-                    clinic_name = appointment.clinic.name
-            else:
-                # Работаем напрямую с объектом пациента
-                patient = entity
-                patient_code = patient.patient_code
-                appointment = None
-
-                # Пытаемся найти активную запись, если существует
-                latest_appointment = Appointment.objects.filter(
-                    patient=patient,
-                    is_active=True
-                ).order_by('-start_time').first()
-
-                if latest_appointment:
-                    appointment_time = latest_appointment.start_time.strftime("%Y-%m-%d %H:%M")
-                    doctor_name = latest_appointment.doctor.full_name if latest_appointment.doctor else "Не указан"
-                    clinic_name = latest_appointment.clinic.name if latest_appointment.clinic else "Не указана"
-                else:
-                    appointment_time = "Нет активной записи"
-                    doctor_name = "Не указан"
-                    clinic_name = "Не указана"
-
-            # Получаем текущую дату и время по московскому времени (UTC+3)
-            from datetime import timezone as tz
-            moscow_tz = tz(timedelta(hours=3))
-            current_moscow_datetime = datetime.now(moscow_tz)
-
-            # Форматируем текущую дату и время по Москве
-            current_moscow_date = current_moscow_datetime.strftime("%Y-%m-%d")
-            current_moscow_time = current_moscow_datetime.strftime("%H:%M")
-            current_moscow_full = current_moscow_datetime.strftime("%Y-%m-%d %H:%M")
-
-            # Получаем даты на сегодня и на завтра по московскому времени
-            today = current_moscow_datetime.strftime("%Y-%m-%d")
-            tomorrow = (current_moscow_datetime + timedelta(days=1)).strftime("%Y-%m-%d")
-
-            # Получаем день недели на русском
-            weekdays_ru = {
-                0: "Понедельник",
-                1: "Вторник",
-                2: "Среда",
-                3: "Четверг",
-                4: "Пятница",
-                5: "Суббота",
-                6: "Воскресенье"
-            }
-            current_weekday = weekdays_ru[current_moscow_datetime.weekday()]
-
-            # Получаем доступные слоты для пациента из базы данных
-            from reminder.models import AvailableTimeSlot
-
-            today_date = current_moscow_datetime.date()
-            tomorrow_date = today_date + timedelta(days=1)
-
-            today_slots = AvailableTimeSlot.objects.filter(
-                patient=patient,
-                date=today_date
-            ).order_by('time').values_list('time', flat=True)
-
-            tomorrow_slots = AvailableTimeSlot.objects.filter(
-                patient=patient,
-                date=tomorrow_date
-            ).order_by('time').values_list('time', flat=True)
-
-            # Форматируем времена в строки для показа
-            today_times = [slot.strftime('%H:%M') for slot in today_slots]
-            tomorrow_times = [slot.strftime('%H:%M') for slot in tomorrow_slots]
-
-            # Получаем последние сообщения из треда для анализа контекста
+            # Get the last few messages to extract context
             messages = self.client.beta.threads.messages.list(
                 thread_id=thread_id,
-                limit=5,
+                limit=10,  # Increased limit to ensure we catch context
                 order="desc"
             )
 
-            # Ищем последнее сообщение с временами
+            # Extract context from previous assistant messages
             last_times_message = None
             date_from_context = None
             day_from_context = None
+            time_slots = []
 
             for message in messages.data:
                 if message.role == "assistant" and hasattr(message, 'content') and message.content:
@@ -394,18 +278,25 @@ class AssistantClient:
                         if hasattr(content_item, 'text') and content_item.text:
                             content_text += content_item.text.value
 
-                    # Проверяем наличие информации о доступных временах
+                    # Check for time-related statuses in JSON format
                     if any(marker in content_text for marker in
                            ["first_time", "second_time", "third_time", "which_time"]):
                         last_times_message = content_text
 
-                        # Ищем дату в сообщении
+                        # Extract date information
                         date_pattern = r'"date":\s*"([^"]+)"'
                         date_match = re.search(date_pattern, content_text)
 
-                        # Ищем день (сегодня/завтра)
+                        # Extract day information (today/tomorrow)
                         day_pattern = r'"day":\s*"([^"]+)"'
                         day_match = re.search(day_pattern, content_text)
+
+                        # Extract time slots
+                        time_pattern = r'"(first_time|second_time|third_time)":\s*"([^"]+)"'
+                        time_matches = re.findall(time_pattern, content_text)
+
+                        if time_matches:
+                            time_slots = [time_value for _, time_value in time_matches]
 
                         if date_match:
                             date_from_context = date_match.group(1)
@@ -415,85 +306,55 @@ class AssistantClient:
 
                         break
 
-            # Создаем контекст доступных слотов
-            available_slots_context = f"""
-            ## ДОСТУПНЫЕ ВРЕМЕННЫЕ СЛОТЫ
+            # Build powerful context instructions if we found relevant previous context
+            context_instructions = ""
+            if last_times_message and (date_from_context or day_from_context) and time_slots:
+                context_instructions = f"""
+                ## КРИТИЧЕСКИ ВАЖНЫЙ ПРЕДЫДУЩИЙ КОНТЕКСТ
 
-            ### На сегодня ({today_date.strftime('%d.%m.%Y')}):
-            {', '.join(today_times) if today_times else "Нет доступных слотов"}
+                В предыдущем ответе я показал пациенту следующие доступные времена:
 
-            ### На завтра ({tomorrow_date.strftime('%d.%m.%Y')}):
-            {', '.join(tomorrow_times) if tomorrow_times else "Нет доступных слотов"}
-            """
+                ### Дата: {date_from_context or "Неизвестно"}"""
 
-            # Создаем контекст предыдущего взаимодействия
-            previous_interaction_context = ""
-            if last_times_message and (date_from_context or day_from_context):
-                # Извлекаем времена из сообщения
-                time_pattern = r'"(first_time|second_time|third_time)":\s*"([^"]+)"'
-                time_matches = re.findall(time_pattern, last_times_message)
+                if day_from_context:
+                    context_instructions += f" ({day_from_context})"
 
-                if time_matches:
-                    previous_interaction_context = f"""
-                    ## КРИТИЧЕСКИ ВАЖНЫЙ ПРЕДЫДУЩИЙ КОНТЕКСТ
+                context_instructions += "\n\n"
 
-                    В предыдущем ответе я показал пациенту следующие доступные времена:
-                    """
+                # Add time slots with explicit labeling
+                for i, time_value in enumerate(time_slots):
+                    slot_label = {0: "Первое время", 1: "Второе время", 2: "Третье время"}.get(i, f"Время {i + 1}")
+                    context_instructions += f"- {slot_label}: {time_value}\n"
 
-                    if date_from_context:
-                        previous_interaction_context += f"\n### Дата: {date_from_context}"
+                context_instructions += """
+                ## ПРАВИЛА ОБРАБОТКИ ССЫЛОК НА ПРЕДЫДУЩИЕ ВРЕМЕНА
 
-                    if day_from_context:
-                        previous_interaction_context += f" ({day_from_context})"
+                КРИТИЧЕСКИ ВАЖНО: Когда пользователь ссылается на времена из предыдущего контекста:
 
-                    previous_interaction_context += "\n"
+                1. Если пользователь говорит "первое время", "первый вариант", "первое", "на первое окошко" → ему нужно первое время из списка выше
+                2. Если пользователь говорит "второе время", "второй вариант", "второе", "на второе окошко" → ему нужно второе время из списка выше
+                3. Если пользователь говорит "третье время", "третий вариант", "третье", "на третье окошко" → ему нужно третье время из списка выше
+                4. Если пользователь говорит "давай", "ок", "да", "хорошо", "записывай" без уточнения → ему нужно первое время из списка
 
-                    for time_type, time_value in time_matches:
-                        time_label = {
-                            "first_time": "Первое время",
-                            "second_time": "Второе время",
-                            "third_time": "Третье время"
-                        }.get(time_type, time_type)
+                КРИТИЧЕСКИ ВАЖНО: Используй именно ту ДАТУ, которая была показана ранее! 
+                Не используй сегодняшнюю дату, если в предыдущем ответе была показана дата другого дня!
 
-                        previous_interaction_context += f"- {time_label}: {time_value}\n"
+                Если пациент говорит что-то вроде "а давай на первое окошко" после того, как ему были показаны
+                времена на другую дату, запись ДОЛЖНА быть сделана на ПЕРВОЕ ИЗ ПОКАЗАННЫХ ВРЕМЕН с ДАТОЙ ИЗ КОНТЕКСТА,
+                а НЕ с сегодняшней датой!
+                """
 
-                    previous_interaction_context += """
-                    ## ПРАВИЛА ОБРАБОТКИ ССЫЛОК НА ПРЕДЫДУЩИЕ ВРЕМЕНА
+            # Create final instructions by combining context with other instructions
+            final_instructions = ""
 
-                    Когда пользователь ссылается на времена из предыдущего контекста:
-
-                    1. Если пользователь говорит "первое время", "первый вариант", "первое" → ему нужно первое время из списка выше
-                    2. Если пользователь говорит "второе время", "второй вариант", "второе" → ему нужно второе время из списка выше
-                    3. Если пользователь говорит "третье время", "третий вариант", "третье" → ему нужно третье время из списка выше
-
-                    КРИТИЧЕСКИ ВАЖНО: Используй именно ту ДАТУ, которая была показана ранее! 
-                    Не используй сегодняшнюю дату, если в предыдущем ответе была показана дата завтрашнего дня!
-
-                    Если пользователь говорит "запишите на первое время" после того, как ему были показаны 
-                    времена на завтра, то запись должна быть сделана НА ЗАВТРА на ПЕРВОЕ ИЗ ПОКАЗАННЫХ ВРЕМЕН,
-                    а НЕ на сегодня!
-                    """
-
-            # Комбинируем все контексты и инструкции
-            context_instructions = """
-            ## КРИТИЧЕСКИЕ ПРАВИЛА СОХРАНЕНИЯ КОНТЕКСТА
-
-            1. ВСЕГДА смотри предыдущий контекст разговора с пациентом
-            2. Если пациент говорит "запишите на первое время", это ВСЕГДА ссылка на последний показанный список времен
-            3. НИКОГДА не сбрасывай дату на текущую при ссылке на предыдущий список времен
-            4. Если показаны времена на завтра, и пациент говорит "первое время" - запись ДОЛЖНА быть на завтра!
-            5. ЗАПРЕЩЕНО игнорировать день, указанный в предыдущем контексте
-            """
-
-            # Объединяем все инструкции
-            full_instructions = ""
+            if context_instructions:
+                final_instructions += context_instructions + "\n\n"
 
             if instructions:
-                # Просто используем предоставленные инструкции без форматирования
-                full_instructions = instructions
+                final_instructions += instructions
             else:
-                # Используем стандартные инструкции
-                full_instructions = """
+                # Default instructions if none provided
+                final_instructions += """
                 # КРИТИЧЕСКИ ВАЖНО: ВСЕГДА ИСПОЛЬЗУЙ ФУНКЦИИ, А НЕ ТЕКСТОВЫЕ ОТВЕТЫ!
 
                 В следующих ситуациях ты ОБЯЗАТЕЛЬНО должен вызвать функцию вместо текстового ответа:
@@ -514,13 +375,7 @@ class AssistantClient:
                 # ВСЕГДА вызывай соответствующую функцию!
                 """
 
-            # Добавляем контекстные инструкции
-            final_instructions = (full_instructions + "\n\n" +
-                                  previous_interaction_context + "\n\n" +
-                                  available_slots_context + "\n\n" +
-                                  context_instructions)
-
-            # Создаем запуск ассистента с инструкциями
+            # Create run with final instructions
             try:
                 openai_run = self.client.beta.threads.runs.create(
                     thread_id=thread_id,
@@ -528,56 +383,21 @@ class AssistantClient:
                     instructions=final_instructions
                 )
 
-                # Сохраняем запуск в базе данных
+                # Save run in database
                 run = RunModel.objects.create(
                     run_id=openai_run.id,
                     status=openai_run.status
                 )
 
-                # Обновляем тред с текущим запуском
+                # Update thread with current run
                 thread.current_run = run
                 thread.save()
 
-                logger.info(
-                    f"Запущен run {run.run_id} для треда {thread_id} с инструкциями для сохранения контекста (время Москвы: {current_moscow_full})")
+                logger.info(f"Запущен run {run.run_id} для треда {thread_id} с инструкциями для сохранения контекста")
                 return run
             except Exception as run_error:
-                # Если получаем ошибку об активном запуске, пробуем создать новый тред
-                error_message = str(run_error)
-                if "already has an active run" in error_message:
-                    logger.warning(
-                        f"Тред {thread_id} уже имеет активный запуск, несмотря на нашу проверку. Создаем новый тред и пытаемся снова.")
-
-                    # Создаем новый тред еще раз
-                    new_thread = self._create_fresh_thread(entity)
-
-                    # Обновляем исходный объект Thread
-                    thread.thread_id = new_thread.thread_id
-                    thread.save()
-
-                    # Пытаемся создать запуск с новым тредом
-                    openai_run = self.client.beta.threads.runs.create(
-                        thread_id=new_thread.thread_id,
-                        assistant_id=thread.assistant.assistant_id,
-                        instructions=final_instructions
-                    )
-
-                    # Сохраняем запуск в базе данных
-                    run = RunModel.objects.create(
-                        run_id=openai_run.id,
-                        status=openai_run.status
-                    )
-
-                    # Обновляем тред с текущим запуском
-                    thread.current_run = run
-                    thread.save()
-
-                    logger.info(
-                        f"Запущен run {run.run_id} для нового треда {new_thread.thread_id} после ошибки с активным запуском (время Москвы: {current_moscow_full})")
-                    return run
-                else:
-                    # Для других ошибок просто вызываем исключение
-                    raise
+                logger.error(f"Ошибка при создании запуска: {run_error}", exc_info=True)
+                raise
 
         except Exception as e:
             logger.error(f"Ошибка запуска ассистента: {e}", exc_info=True)
