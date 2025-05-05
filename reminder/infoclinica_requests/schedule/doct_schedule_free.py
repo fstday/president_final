@@ -1,5 +1,10 @@
 import os
 import django
+
+# Настройки Django
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'president_final.settings')
+django.setup()
+
 import logging
 import requests
 import xml.etree.ElementTree as ET
@@ -33,17 +38,6 @@ key_file_path = os.path.join(certs_dir, 'key.pem')
 def get_patient_doctor_schedule(patient_code, days_horizon=7, online_mode=0, return_raw=False):
     """
     Получение графика работы врача для пациента с использованием запроса DOCT_SCHEDULE_FREE.
-
-    Параметры:
-    patient_code (int): Код пациента
-    days_horizon (int): Горизонт планирования в днях (используется только для расчета даты окончания)
-    online_mode (int): Режим приема: 0 - в клинике, 1 - и клиника и онлайн
-    return_raw (bool): Если True, возвращает сырой XML-ответ
-
-    Возвращает:
-    В зависимости от параметра return_raw:
-      - True: строку с XML-ответом
-      - False: словарь с результатами запроса или None при ошибке
     """
     logger.info(f"Запрос графика работы для пациента: {patient_code}")
 
@@ -78,15 +72,20 @@ def get_patient_doctor_schedule(patient_code, days_horizon=7, online_mode=0, ret
         ts_1 = datetime.now().strftime("%Y%m%d%H%M%S")
         msh_10 = generate_msh_10()
 
-        # Properly format filter lists based on retrieved data
+        # Формируем элементы запроса в зависимости от имеющихся данных
         filial_element = f"<FILIALLIST>{clinic_id}</FILIALLIST>" if clinic_id else "<FILIALLIST></FILIALLIST>"
 
-        # Only include DOCTLIST if doctor_code exists, otherwise empty
-        doct_element = f"<DOCTLIST>{doctor_code}</DOCTLIST>" if doctor_code else "<DOCTLIST></DOCTLIST>"
-
-        # Only include DEPLIST if doctor_code doesn't exist and department_id exists
-        dep_element = "" if doctor_code else (
-            f"<CASHLIST>{department_id}</CASHLIST>" if department_id else "<CASHLIST></CASHLIST>")
+        # Если есть doctor_code - отправляем только его
+        if doctor_code:
+            doctor_filter = f"<DOCTLIST>{doctor_code}</DOCTLIST>"
+            department_filter = ""
+        # Если есть только department_id - отправляем только его
+        elif department_id:
+            doctor_filter = ""
+            department_filter = f"<CASHLIST>{department_id}</CASHLIST>"
+        else:
+            doctor_filter = ""
+            department_filter = ""
 
         # Construct the XML request
         xml_request = f'''
@@ -104,9 +103,7 @@ def get_patient_doctor_schedule(patient_code, days_horizon=7, online_mode=0, ret
             <MSH.99>{clinic_id if clinic_id else ""}</MSH.99>
           </MSH>
           <DOCT_SCHEDULE_FREE_IN>
-            {filial_element}
-            {dep_element}
-            {doct_element}
+            {filial_element}{department_filter}{doctor_filter}
             <SCHEDIDENTLIST></SCHEDIDENTLIST>
             <BDATE>{bdate}</BDATE>
             <FDATE>{fdate}</FDATE>
@@ -253,6 +250,7 @@ def get_available_doctor_by_patient(patient_code):
 def parse_doctor_schedule_response(xml_response):
     """
     Разбор XML-ответа для запроса DOCT_SCHEDULE_FREE
+    Обрабатывает как ответы с одним врачом, так и ответы со всеми врачами отделения
 
     Параметры:
     xml_response (str): XML ответ от сервера
@@ -301,10 +299,12 @@ def parse_doctor_schedule_response(xml_response):
             logger.info("ℹ️ График работы не найден в ответе")
             return {
                 'success': True,
-                'schedules': []
+                'schedules': [],
+                'by_doctor': {}  # Добавляем структуру для группировки по врачам
             }
 
         schedules = []
+        by_doctor = {}  # Группировка по врачам
 
         for sched in schedule_elements:
             schedule_data = {}
@@ -398,12 +398,34 @@ def parse_doctor_schedule_response(xml_response):
 
             schedules.append(schedule_data)
 
+            # Группируем по врачам
+            doctor_code = schedule_data.get('doctor_code')
+            if doctor_code:
+                if doctor_code not in by_doctor:
+                    by_doctor[doctor_code] = {
+                        'doctor_name': schedule_data.get('doctor_name'),
+                        'department_id': schedule_data.get('department_id'),
+                        'department_name': schedule_data.get('department_name'),
+                        'clinic_id': schedule_data.get('clinic_id'),
+                        'clinic_name': schedule_data.get('clinic_name'),
+                        'schedules': []
+                    }
+                by_doctor[doctor_code]['schedules'].append(schedule_data)
+
         # Сортируем результаты по дате и времени
         schedules.sort(key=lambda x: (x.get('date', ''), x.get('begin_hour', 0), x.get('begin_min', 0)))
 
+        # Логирование для отладки
+        if by_doctor:
+            logger.info(f"Найдено врачей: {len(by_doctor)}")
+            for doctor_code, doctor_data in by_doctor.items():
+                logger.info(
+                    f"Врач: {doctor_data['doctor_name']} (ID: {doctor_code}), расписаний: {len(doctor_data['schedules'])}")
+
         return {
             'success': True,
-            'schedules': schedules
+            'schedules': schedules,
+            'by_doctor': by_doctor  # Включаем группировку по врачам
         }
 
     except Exception as e:
@@ -504,3 +526,59 @@ def check_day_has_free_slots(patient_code, date_str):
             'department_id': None,
             'clinic_id': None
         }
+
+
+def select_best_doctor_from_schedules(schedules_by_doctor, target_date_str):
+    """
+    Выбирает лучшего врача из доступных с расписанием на указанную дату
+
+    Args:
+        schedules_by_doctor: Словарь расписаний по врачам
+        target_date_str: Целевая дата в формате YYYY-MM-DD
+
+    Returns:
+        tuple: (doctor_code, doctor_name, department_id)
+    """
+    best_doctor = None
+    most_free_slots = 0
+
+    for doctor_code, doctor_data in schedules_by_doctor.items():
+        free_slots_count = 0
+
+        for schedule in doctor_data['schedules']:
+            if schedule.get('date_iso') == target_date_str and schedule.get('has_free_slots', False):
+                free_slots_count += schedule.get('free_count', 0)
+
+        if free_slots_count > most_free_slots:
+            most_free_slots = free_slots_count
+            best_doctor = {
+                'doctor_code': doctor_code,
+                'doctor_name': doctor_data['doctor_name'],
+                'department_id': doctor_data['department_id']
+            }
+
+    if best_doctor:
+        logger.info(
+            f"Выбран врач: {best_doctor['doctor_name']} (ID: {best_doctor['doctor_code']}) с {most_free_slots} свободными слотами")
+        return best_doctor['doctor_code'], best_doctor['doctor_name'], best_doctor['department_id']
+
+    return None, None, None
+
+
+# Пример использования
+if __name__ == "__main__":
+    # Пример с пациентом из реальных данных
+    patient_code = 990000612  # Пример: Тест Иван Иванович
+
+    # Сначала получаем сырой XML-ответ
+    print("\nПОЛУЧЕНИЕ ГРАФИКА РАБОТЫ ДЛЯ ПАЦИЕНТА")
+    raw_response = get_patient_doctor_schedule(patient_code, return_raw=True)
+
+    # Сохраняем сырой ответ для печати позже
+    print("\nСЫРОЙ XML-ОТВЕТ:")
+    print("-" * 80)
+    print(raw_response)
+    print("-" * 80)
+
+    # Затем используем сырой ответ для создания обработанного вывода
+    processed_result = parse_doctor_schedule_response(raw_response)

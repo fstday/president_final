@@ -1,8 +1,12 @@
 from datetime import datetime, timedelta
 from django.core.cache import cache
 from django.utils import timezone
+import logging
+from django.core.cache import cache
+from datetime import datetime
 
-# Кэш на 15 минут (в секундах)
+logger = logging.getLogger(__name__)
+
 CACHE_DURATION = 60 * 15
 
 
@@ -17,26 +21,57 @@ def get_schedule_cache_key(patient_code):
 
 def get_cached_schedule(patient_code):
     """
-    Получает закэшированное 7-дневное расписание или None
+    Получает кэшированное расписание
     """
-    cache_key = get_schedule_cache_key(patient_code)
-    return cache.get(cache_key)
+    try:
+        cache_key = f"schedule_{patient_code}"
+        cached_data = cache.get(cache_key)
+
+        if cached_data:
+            logger.info(f"Найдено кэшированное расписание для пациента {patient_code}")
+            return cached_data
+
+        logger.info(f"Кэшированное расписание для пациента {patient_code} не найдено")
+        return None
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении кэшированного расписания: {e}")
+        return None
 
 
 def cache_schedule(patient_code, schedule_data):
     """
-    Сохраняет 7-дневное расписание в кэш на 15 минут
+    Кэширует расписание и определяет целевую клиникую
     """
-    cache_key = get_schedule_cache_key(patient_code)
+    try:
+        cache_key = f"schedule_{patient_code}"
 
-    # Сохраняем с датой создания для отслеживания актуальности
-    data_to_cache = {
-        'created_at': timezone.now().isoformat(),
-        'data': schedule_data
-    }
+        # Определяем целевую клинику из расписания
+        target_clinic = None
+        if schedule_data.get('schedules'):
+            for schedule in schedule_data['schedules']:
+                if schedule.get('clinic_id'):
+                    target_clinic = schedule['clinic_id']
+                    break
 
-    cache.set(cache_key, data_to_cache, CACHE_DURATION)
-    return True
+        # Добавляем информацию о целевой клинике в кэш
+        cache_data = {
+            'timestamp': datetime.now().isoformat(),
+            'schedules': schedule_data.get('schedules', []),
+            'by_doctor': schedule_data.get('by_doctor', {}),
+            'patient_code': patient_code,
+            'success': schedule_data.get('success', True),
+            'target_clinic': target_clinic
+        }
+
+        # Устанавливаем кэш с 15-минутным истечением
+        cache.set(cache_key, cache_data, timeout=900)
+
+        logger.info(f"Расписание для пациента {patient_code} кэшировано на 15 минут")
+        logger.info(f"Целевая клиника определена: {target_clinic}")
+
+    except Exception as e:
+        logger.error(f"Ошибка при кэшировании расписания: {e}")
 
 
 def check_day_has_slots_from_cache(patient_code, date_str, cached_data=None):

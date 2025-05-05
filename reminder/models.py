@@ -119,7 +119,7 @@ class Patient(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Дата создания записи")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Дата обновления записи")
 
-    # Добавьте эти поля в модель Patient
+    last_used_doctor = models.ForeignKey(Doctor, on_delete=models.SET_NULL, null=True, blank=True)
     last_queue_reason_code = models.CharField(
         max_length=20, null=True, blank=True,
         verbose_name="Последняя причина очереди (код)"
@@ -637,3 +637,16 @@ class QueueReasonMapping(models.Model):
 
     def __str__(self):
         return f"{self.reason.reason_name} → {self.internal_name} ({self.internal_code})"
+
+
+class PatientDoctorAssociation(models.Model):
+    """Модель для хранения ассоциаций пациента с врачами"""
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name='doctor_associations')
+    doctor = models.ForeignKey(Doctor, on_delete=models.CASCADE)
+    department = models.ForeignKey(Department, on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = ['patient', 'doctor']
+        ordering = ['-created_at']
