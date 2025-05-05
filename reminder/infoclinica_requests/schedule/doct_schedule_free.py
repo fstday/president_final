@@ -568,7 +568,7 @@ def select_best_doctor_from_schedules(schedules_by_doctor, target_date_str):
 # Пример использования
 if __name__ == "__main__":
     # Пример с пациентом из реальных данных
-    patient_code = 990000612  # Пример: Тест Иван Иванович
+    patient_code = 10000240  # Пример: Тест Иван Иванович
 
     # Сначала получаем сырой XML-ответ
     print("\nПОЛУЧЕНИЕ ГРАФИКА РАБОТЫ ДЛЯ ПАЦИЕНТА")

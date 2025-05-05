@@ -640,13 +640,20 @@ class QueueReasonMapping(models.Model):
 
 
 class PatientDoctorAssociation(models.Model):
-    """Модель для хранения ассоциаций пациента с врачами"""
+    """Ассоциация врача с пациентом"""
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name='doctor_associations')
-    doctor = models.ForeignKey(Doctor, on_delete=models.CASCADE)
-    department = models.ForeignKey(Department, on_delete=models.SET_NULL, null=True, blank=True)
+    doctor = models.ForeignKey(Doctor, on_delete=models.CASCADE, related_name='patient_associations')
+
+    # Дополнительная информация
     created_at = models.DateTimeField(auto_now_add=True)
-    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    last_booking_date = models.DateTimeField(null=True, blank=True)
+    is_preferred = models.BooleanField(default=False)  # Постоянно предпочитаемый врач
+    booking_count = models.IntegerField(default=0)  # Количество записей к этому врачу
 
     class Meta:
         unique_together = ['patient', 'doctor']
-        ordering = ['-created_at']
+        ordering = ['-updated_at']
+
+    def __str__(self):
+        return f"{self.patient.full_name} -> {self.doctor.full_name}"

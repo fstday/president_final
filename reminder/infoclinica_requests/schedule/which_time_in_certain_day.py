@@ -11,7 +11,7 @@ from reminder.infoclinica_requests.schedule.doct_schedule_free import check_day_
 from reminder.infoclinica_requests.schedule.schedule_cache import (
     get_cached_schedule, cache_schedule, check_day_has_slots_from_cache
 )
-from reminder.models import Patient, Appointment, QueueInfo, Clinic, AvailableTimeSlot
+from reminder.models import Patient, Appointment, QueueInfo, Clinic, AvailableTimeSlot, Doctor, PatientDoctorAssociation
 from reminder.infoclinica_requests.utils import format_doctor_name, format_russian_date
 from django.utils.timezone import make_aware
 
@@ -30,6 +30,54 @@ os.makedirs(certs_dir, exist_ok=True)
 cert_file_path = os.path.join(certs_dir, 'cert.pem')
 key_file_path = os.path.join(certs_dir, 'key.pem')
 current_date_time_for_xml = datetime.now().strftime('%Y%m%d%H%M%S')
+
+
+def select_best_available_doctor_for_date(patient_code, date_str, cached_data):
+    """
+    Выбирает лучшего доступного врача для определенной даты из кэшированных данных
+    """
+    logger.info(f"Поиск лучшего врача для пациента {patient_code} на дату {date_str}")
+
+    if not cached_data:
+        logger.warning("Нет кэшированных данных")
+        return None, None, None
+
+    data = cached_data.get('data', cached_data)
+    by_doctor = data.get('by_doctor', {})
+
+    if not by_doctor:
+        logger.warning("В кэше нет информации о врачах")
+        return None, None, None
+
+    available_doctors = []
+
+    # Проходим по всем врачам и их расписаниям
+    for doctor_code, doctor_data in by_doctor.items():
+        for schedule in doctor_data.get('schedules', []):
+            # Проверяем, совпадает ли дата и есть ли свободные слоты
+            if (schedule.get('date_iso') == date_str and
+                    schedule.get('has_free_slots', False)):
+                available_doctors.append({
+                    'doctor_code': doctor_code,
+                    'doctor_name': doctor_data.get('doctor_name'),
+                    'free_count': schedule.get('free_count', 0),
+                    'department_id': doctor_data.get('department_id'),
+                    'department_name': doctor_data.get('department_name'),
+                    'clinic_id': schedule.get('clinic_id')
+                })
+
+    if not available_doctors:
+        logger.info(f"Нет доступных врачей на дату {date_str}")
+        return None, None, None
+
+    # Сортируем по количеству свободных слотов (больше - лучше)
+    available_doctors.sort(key=lambda x: x['free_count'], reverse=True)
+    best_doctor = available_doctors[0]
+
+    logger.info(
+        f"Выбран врач: {best_doctor['doctor_name']} (ID: {best_doctor['doctor_code']}) с {best_doctor['free_count']} свободными слотами")
+
+    return best_doctor['doctor_code'], best_doctor['doctor_name'], best_doctor.get('clinic_id')
 
 
 def which_time_in_certain_day(patient_code, date_time):
@@ -104,21 +152,79 @@ def which_time_in_certain_day(patient_code, date_time):
         doctor_code = None
         doctor_name = None
 
-        # Пытаемся получить доктора из кэшированных данных
+        # ВАЖНО: Пытаемся получить доктора из кэшированных данных первыми, чтобы зафиксировать выбор
         if day_check.get('doctor_code'):
             doctor_code = day_check.get('doctor_code')
             logger.info(f"Получен доктор из кэша: {doctor_code}")
+
+            # Исправление в методе which_time_in_certain_day (строки 160-181):
+
+            # Сразу создаем или обновляем объект Doctor
+            try:
+                doctor_obj = Doctor.objects.get(doctor_code=doctor_code)
+                logger.info(f"Найден объект врача: {doctor_obj.full_name}")
+            except Doctor.DoesNotExist:
+                # Если объект врача не найден, создаем новый
+                # Пытаемся получить имя врача из кэшированных данных
+                if cached_schedule and isinstance(cached_schedule, dict) and 'by_doctor' in cached_schedule and str(
+                        doctor_code) in cached_schedule['by_doctor']:
+                    doctor_name = cached_schedule['by_doctor'][str(doctor_code)].get('doctor_name',
+                                                                                     f'Doctor {doctor_code}')
+                else:
+                    # Если нет имени в кэше, пытаемся получить из XML ответа
+                    if response and response.status_code == 200:
+                        try:
+                            root = ET.fromstring(response.text)
+                            namespace = {'ns': 'http://sdsys.ru/'}
+
+                            # Ищем врача с нужным doctor_code в расписании
+                            schedules = root.findall('.//ns:DOCT_SCHEDULE_FREE_OUT/ns:SCHINTERVAL', namespace)
+                            for schedule in schedules:
+                                dcode_element = schedule.find('ns:DCODE', namespace)
+                                if dcode_element is not None and dcode_element.text == str(doctor_code):
+                                    dname_element = schedule.find('ns:DNAME', namespace)
+                                    if dname_element is not None and dname_element.text:
+                                        doctor_name = dname_element.text
+                                        break
+                            else:
+                                doctor_name = f'Doctor {doctor_code}'
+                        except Exception as e:
+                            logger.error(f"Error parsing doctor name from XML: {e}")
+                            doctor_name = f'Doctor {doctor_code}'
+                    else:
+                        doctor_name = f'Doctor {doctor_code}'
+
+                # Создаем объект врача с нормальным именем
+                doctor_obj, created = Doctor.objects.get_or_create(
+                    doctor_code=doctor_code,
+                    defaults={'full_name': doctor_name}
+                )
+                logger.info(f"Создан объект врача: {doctor_obj.full_name} (ID: {doctor_obj.doctor_code})")
+
+            # ВАЖНО: Обновляем last_used_doctor для пациента
+            patient.last_used_doctor = doctor_obj
+            patient.save()
+
+            logger.info(f"Врач {doctor_obj.full_name} закреплен за пациентом {patient_code}")
         else:
-            # Сначала проверяем в записях
-            appointment = Appointment.objects.filter(patient=patient, is_active=True).first()
-            if appointment:
-                if appointment.doctor:
+            # Если врач не найден в кэше, проверяем уже существующие ассоциации
+            # сначала проверяем в PatientDoctorAssociation
+            association = PatientDoctorAssociation.objects.filter(patient=patient).first()
+            if association and association.doctor:
+                doctor_code = association.doctor.doctor_code
+                doctor_name = association.doctor.full_name
+                logger.info(f"Найден доктор из ассоциации: {doctor_name} (ID: {doctor_code})")
+
+            # Если не найден в ассоциациях, проверяем в записях
+            if not doctor_code:
+                appointment = Appointment.objects.filter(patient=patient, is_active=True).first()
+                if appointment and appointment.doctor:
                     doctor_code = appointment.doctor.doctor_code
                     doctor_name = appointment.doctor.full_name
                     logger.info(f"Найден доктор из активной записи: {doctor_name} (ID: {doctor_code})")
 
             # Если не нашли в записях, проверяем в очереди
-            if doctor_code is None:
+            if not doctor_code:
                 queue_entry = QueueInfo.objects.filter(patient=patient).first()
                 if queue_entry and queue_entry.doctor_code:
                     doctor_code = queue_entry.doctor_code
@@ -249,29 +355,36 @@ def which_time_in_certain_day(patient_code, date_time):
                 date=requested_date_only
             ).delete()
 
-            # Затем сохраняем новые
-            appointment = Appointment.objects.filter(patient=patient, is_active=True).first()
-            doctor_obj = appointment.doctor if appointment and appointment.doctor else None
-            clinic_obj = None
-
             # Получаем объект клиники по target_branch_id
+            clinic_obj = None
             if target_branch_id:
                 try:
                     clinic_obj = Clinic.objects.get(clinic_id=target_branch_id)
                 except Clinic.DoesNotExist:
                     logger.warning(f"Клиника с ID {target_branch_id} не найдена")
 
+            # Получаем объект врача для записи в AvailableTimeSlot
+            doctor_obj = None
+            if doctor_code:
+                try:
+                    doctor_obj = Doctor.objects.get(doctor_code=doctor_code)
+                except Doctor.DoesNotExist:
+                    logger.warning(f"Врач с кодом {doctor_code} не найден")
+
             for interval in free_time_intervals:
                 time_str = interval["start_time"]
                 hour, minute = map(int, time_str.split(':'))
                 time_obj = dt_time(hour, minute)
 
-                AvailableTimeSlot.objects.create(
+                # Используем get_or_create для избежания ошибок UNIQUE constraint
+                AvailableTimeSlot.objects.get_or_create(
                     patient=patient,
                     date=requested_date_only,
                     time=time_obj,
-                    doctor=doctor_obj,
-                    clinic=clinic_obj
+                    defaults={
+                        'doctor': doctor_obj,
+                        'clinic': clinic_obj
+                    }
                 )
 
             # Получаем все доступные времена для отображения

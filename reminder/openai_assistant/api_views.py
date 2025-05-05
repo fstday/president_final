@@ -24,7 +24,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.conf import settings
 from django.utils import timezone as django_timezone
-
+from reminder.models import Patient, Appointment, Assistant, Thread, Run, IgnoredPatient, AvailableTimeSlot, PatientDoctorAssociation
+from reminder.infoclinica_requests.utils import format_doctor_name
 from reminder.infoclinica_requests.utils import format_doctor_name
 from reminder.models import Patient, Appointment, Assistant, Thread, Run, IgnoredPatient, AvailableTimeSlot
 from reminder.infoclinica_requests.schedule.which_time_in_certain_day import which_time_in_certain_day
@@ -156,9 +157,38 @@ def process_which_time_response(response_data, date_obj, patient_code, user_inpu
     relation = get_date_relation(date_obj)
 
     # Получаем имя специалиста
-    specialist_name = response_data.get("specialist_name",
-                                        response_data.get("doctor", format_doctor_name(patient_code)))
+    specialist_name = response_data.get("specialist_name", response_data.get("doctor", None))
 
+    # ИСПРАВЛЕНИЕ: Если имя специалиста не найдено в ответе, ищем его через модели
+    if not specialist_name or specialist_name == "Специалист":
+        try:
+            patient = Patient.objects.get(patient_code=patient_code)
+
+            # Ищем последнего использованного врача
+            if patient.last_used_doctor:
+                specialist_name = patient.last_used_doctor.full_name
+                logger.info(f"Получено имя врача из last_used_doctor: {specialist_name}")
+            else:
+                # Ищем врача из PatientDoctorAssociation
+                association = PatientDoctorAssociation.objects.filter(patient=patient).first()
+                if association and association.doctor:
+                    specialist_name = association.doctor.full_name
+                    logger.info(f"Получено имя врача из PatientDoctorAssociation: {specialist_name}")
+                else:
+                    # Ищем врача из активного приема
+                    appointment = Appointment.objects.filter(patient=patient, is_active=True).first()
+                    if appointment and appointment.doctor:
+                        specialist_name = appointment.doctor.full_name
+                        logger.info(f"Получено имя врача из активного приема: {specialist_name}")
+                    else:
+                        # Используем format_doctor_name как последний вариант
+                        specialist_name = format_doctor_name(patient_code)
+                        logger.info(f"Использовано имя врача из format_doctor_name: {specialist_name}")
+        except Patient.DoesNotExist:
+            logger.error(f"Пациент {patient_code} не найден")
+            specialist_name = "Специалист"
+
+    # Остальной код остается без изменений...
     # Извлекаем доступные времена
     available_times = []
 
