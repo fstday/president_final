@@ -27,6 +27,9 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
         logger.info(
             f"Запрос на запись/перенос: patient_id={patient_id}, date_from_patient={date_from_patient}, trigger_id={trigger_id}")
 
+        # Всегда инициализируем cached_result
+        cached_result = None
+
         # Получаем пациента
         patient = Patient.objects.filter(patient_code=patient_id).first()
         if not patient:
@@ -271,20 +274,74 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
             return JsonResponse(result)
 
         # Если точное время доступно, выполняем резервирование
-        # Сначала нужно получить schedident для этого врача и даты
-        from reminder.infoclinica_requests.schedule.schedule_cache import check_day_has_slots_from_cache
+        # Получаем schedident напрямую через WEB_SCHEDULE
 
-        # Получаем schedident из кэша для выбранного врача
+        # Пытаемся получить schedident напрямую
         schedident = None
-        if cached_result and 'by_doctor' in cached_result.get('data', cached_result):
-            by_doctor = cached_result.get('data', cached_result)['by_doctor']
-            if doctor_code in by_doctor:
-                for schedule in by_doctor[doctor_code].get('schedules', []):
-                    if schedule.get('date_iso') == requested_date:
-                        schedident = schedule.get('schedule_id')
-                        break
+        try:
+            from dotenv import load_dotenv
+            import requests
+            import xml.etree.ElementTree as ET
+
+            load_dotenv()
+            infoclinica_api_url = os.getenv('INFOCLINICA_BASE_URL')
+            infoclinica_x_forwarded_host = os.getenv('INFOCLINICA_HOST')
+
+            xml_request = f'''
+            <WEB_SCHEDULE xmlns="http://sdsys.ru/">
+              <MSH>
+                <MSH.3></MSH.3>
+                <MSH.7>
+                  <TS.1>{datetime.now().strftime('%Y%m%d%H%M')}</TS.1>
+                </MSH.7>
+                <MSH.9>
+                  <MSG.1>WEB</MSG.1>
+                  <MSG.2>SCHEDULE</MSG.2>
+                </MSH.9>
+                <MSH.10>f2e89dbc1e813cb680d2f847</MSH.10>
+                <MSH.18>UTF-8</MSH.18>
+                <MSH.99>{target_branch_id}</MSH.99>
+              </MSH>
+              <SCHEDULE_IN>
+                <INDOCTLIST>{doctor_code}</INDOCTLIST>
+                <BDATE>{datetime.strptime(requested_date, '%Y-%m-%d').strftime('%Y%m%d')}</BDATE>
+                <FDATE>{datetime.strptime(requested_date, '%Y-%m-%d').strftime('%Y%m%d')}</FDATE>
+                <EXTINTERV>30</EXTINTERV>
+                <SCHLIST/>
+              </SCHEDULE_IN>
+            </WEB_SCHEDULE>
+            '''
+
+            cert_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'certs', 'cert.pem')
+            key_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'certs', 'key.pem')
+
+            logger.info(f"Полный XML-запрос SCHEDULE: {xml_request}")
+
+            response = requests.post(
+                url=infoclinica_api_url,
+                headers={'X-Forwarded-Host': f'{infoclinica_x_forwarded_host}', 'Content-Type': 'text/xml'},
+                data=xml_request,
+                cert=(cert_file_path, key_file_path)
+            )
+
+            if response.status_code == 200:
+                root = ET.fromstring(response.text)
+                namespace = {'ns': 'http://sdsys.ru/'}
+
+                # Получаем SCHEDIDENT из SCHEDINT
+                schedint = root.find('.//ns:SCHEDINT', namespace)
+                if schedint is not None:
+                    schedident_element = schedint.find('ns:SCHEDIDENT', namespace)
+                    if schedident_element is not None:
+                        schedident = schedident_element.text
+                        logger.info(f"Получен schedident: {schedident}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении schedident: {e}")
 
         if not schedident:
+            logger.error(
+                f"Не удалось получить идентификатор расписания для врача {doctor_code} на дату {requested_date}")
             return JsonResponse({
                 "status": "error",
                 "message": "Не удалось получить идентификатор расписания"

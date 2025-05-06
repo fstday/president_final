@@ -747,6 +747,10 @@ def process_voicebot_request(request):
         user_input = data.get('user_input', '').strip()
         delete_keyword = data.get('delete_reception_keyword')
 
+        logger.info(f'================================='
+                    f'\n\n\nReceived User Input :{user_input}\n\n\n'
+                    f'=================================')
+
         # Initialize Redis context manager for retrieving previous context
         context_manager = ConversationContextManager()
         # Get previous context if available

@@ -210,6 +210,8 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
     </WEB_SCHEDULE_REC_RESERVE>
     """
 
+    logger.info(f"Полный XML-запрос RESERVE: {xml_request}")
+    logger.info(f"Параметры: DCODE={doctor_id}, WORKDATE={workdate}, BHOUR={bhour_str}, BMIN={bmin_str}")
     logger.info(
         f"Отправляем запрос на резервирование: DCODE={doctor_id}, WORKDATE={workdate}, BHOUR={bhour_str}, BMIN={bmin_str}, TOFILIAL={target_branch_id}")
 
