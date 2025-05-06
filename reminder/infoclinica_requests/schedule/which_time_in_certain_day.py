@@ -11,6 +11,10 @@ from reminder.infoclinica_requests.schedule.reserve_reception_for_patient import
 from reminder.models import Patient, Appointment, QueueInfo, Clinic, AvailableTimeSlot, Doctor
 from reminder.infoclinica_requests.utils import format_doctor_name, format_russian_date
 from django.utils.timezone import make_aware
+# Add imports for schedule caching and doctor availability
+from reminder.infoclinica_requests.schedule.doct_schedule_free import get_patient_doctor_schedule, \
+    select_best_doctor_from_schedules, check_day_has_slots_from_cache
+from reminder.infoclinica_requests.schedule.schedule_cache import get_cached_schedule, cache_schedule
 
 # Загрузка переменных окружения и настройка логирования
 load_dotenv()
@@ -60,68 +64,139 @@ def which_time_in_certain_day(patient_code, date_time):
         logger.error(f'Пациент с кодом {patient_code} не найден')
         return JsonResponse({'status': 'error', 'message': f'Пациент с кодом {patient_code} не найден'}, status=404)
 
-    # Получение информации о враче с поддержкой нескольких врачей
+    # Переменные для отслеживания состояния
     doctor_code = None
     doctor_name = None
     target_branch_id = None
+    requires_referral = False
+    has_restrictions = False
+    restriction_message = ""
+    appointment = None  # Initialize appointment variable
 
-    # Сначала проверяем в записях
-    appointment = Appointment.objects.filter(patient=patient, is_active=True).first()
-    if appointment:
-        if appointment.doctor:
-            doctor_code = appointment.doctor.doctor_code
-            doctor_name = appointment.doctor.full_name
-            logger.info(f"Найден доктор из активной записи: {doctor_name} (ID: {doctor_code})")
+    # ВАЖНОЕ ИЗМЕНЕНИЕ: Проверка и использование кэшированных данных о доступных врачах
+    try:
+        # Конвертировать дату в строковый формат
+        date_str = date_time_obj.strftime('%Y-%m-%d')
 
-        # Получаем филиал
-        if appointment.clinic:
-            target_branch_id = appointment.clinic.clinic_id
-            logger.info(f"Найден TOFILIAL из записи: {target_branch_id}")
+        # Переменная для отслеживания требуется ли направление
+        requires_referral = False
+        referral_message = ""
+        appointment = None  # Initialize appointment variable
 
-    # Если не нашли в записях, проверяем в очереди
-    if doctor_code is None:
-        queue_entry = QueueInfo.objects.filter(patient=patient).first()
-        if queue_entry:
-            if queue_entry.doctor_code:
-                doctor_code = queue_entry.doctor_code
-                doctor_name = queue_entry.doctor_name
-                logger.info(f"Найден доктор из очереди: {doctor_name} (ID: {doctor_code})")
+        # Проверяем кэш для всего периода (7 дней)
+        cached_result = get_cached_schedule(patient_code)
 
-            # Получаем филиал
-            if queue_entry.target_branch:
-                target_branch_id = queue_entry.target_branch.clinic_id
-                logger.info(f"Найден TOFILIAL из очереди: {target_branch_id}")
+        if cached_result:
+            logger.info(f"Найден кэш расписания для пациента {patient_code}, проверяем доступность на {date_str}")
 
-    # Если не нашли врача, проверяем последнего использованного врача
-    if doctor_code is None and patient.last_used_doctor:
-        doctor_code = patient.last_used_doctor.doctor_code
-        doctor_name = patient.last_used_doctor.full_name
-        logger.info(f"Используем последнего использованного врача: {doctor_name} (ID: {doctor_code})")
+            # Проверяем доступность слотов из кэша
+            cache_check = check_day_has_slots_from_cache(patient_code, date_str, cached_result)
 
-    # Если все еще нет врача, используем функцию get_available_doctor_by_patient из doct_schedule_free
-    if doctor_code is None:
-        try:
-            from reminder.infoclinica_requests.schedule.doct_schedule_free import get_available_doctor_by_patient
+            if cache_check and cache_check.get('has_slots'):
+                doctor_code = cache_check.get('doctor_code')
+                department_id = cache_check.get('department_id')
+                target_branch_id = cache_check.get('clinic_id')
 
-            found_doctor_code, department_id, branch_id = get_available_doctor_by_patient(patient_code)
-
-            if found_doctor_code:
-                doctor_code = found_doctor_code
                 # Получаем имя врача
                 try:
-                    doctor_obj = Doctor.objects.get(doctor_code=doctor_code)
-                    doctor_name = doctor_obj.full_name
+                    doc = Doctor.objects.get(doctor_code=doctor_code)
+                    doctor_name = doc.full_name
                 except Doctor.DoesNotExist:
-                    doctor_name = "Специалист"
+                    doctor_name = f"Врач {doctor_code}"
 
-                logger.info(f"Найден доктор через get_available_doctor_by_patient: {doctor_name} (ID: {doctor_code})")
+                logger.info(f"✅ Из кэша выбран врач: {doctor_name} (ID: {doctor_code}), отделение: {department_id}")
+            else:
+                logger.info(f"⚠ В кэше не найдено слотов на {date_str}, запрашиваем свежие данные")
+                cached_result = None
 
-            # Если получили филиал и ещё не установили его
-            if branch_id and not target_branch_id:
-                target_branch_id = branch_id
-                logger.info(f"Найден TOFILIAL через get_available_doctor_by_patient: {target_branch_id}")
-        except Exception as e:
-            logger.error(f"Ошибка при вызове get_available_doctor_by_patient: {e}")
+        # Если в кэше нет данных или нет доступных слотов на нужную дату, делаем новый запрос
+        if not cached_result or not cached_result.get('success', False):
+            # Сначала получаем расписание всех врачей для пациента на 7 дней
+            logger.info(f"Вызываем get_patient_doctor_schedule для получения доступных врачей на 7 дней")
+            schedule_result = get_patient_doctor_schedule(patient_code, days_horizon=7)
+
+            if schedule_result.get('success', False):
+                # Кэшируем результат для последующих запросов
+                cache_schedule(patient_code, schedule_result)
+                logger.info(f"Результат запроса DOCT_SCHEDULE_FREE закэширован на 15 минут")
+
+                # Проверяем наличие слотов на указанную дату
+                cache_check = check_day_has_slots_from_cache(patient_code, date_str, schedule_result)
+
+                if cache_check and cache_check.get('has_slots'):
+                    doctor_code = cache_check.get('doctor_code')
+                    department_id = cache_check.get('department_id')
+                    target_branch_id = cache_check.get('clinic_id')
+
+                    # Получаем имя врача
+                    try:
+                        doc = Doctor.objects.get(doctor_code=doctor_code)
+                        doctor_name = doc.full_name
+                    except Doctor.DoesNotExist:
+                        doctor_name = f"Врач {doctor_code}"
+
+                    logger.info(
+                        f"✅ Из свежих данных выбран врач: {doctor_name} (ID: {doctor_code}), отделение: {department_id}")
+                else:
+                    logger.error(f"❌ Не найдено врачей с доступными слотами на {date_str}")
+                    return JsonResponse({
+                        'status': f'error_empty_windows_{date_str.split("-")[-1] if "empty_windows_" in date_str else ""}',
+                        'message': f'На дату {date_str} нет доступных слотов для записи'
+                    })
+            else:
+                logger.error(
+                    f"❌ Не удалось получить расписание врачей: {schedule_result.get('error', 'Неизвестная ошибка')}")
+                # Продолжаем со старой логикой в случае ошибки запроса расписания
+                doctor_code = None
+                doctor_name = None
+                target_branch_id = None
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении доступных врачей: {e}", exc_info=True)
+
+        # Продолжаем со старой логикой в случае ошибки
+        # Получение информации о враче с поддержкой нескольких врачей
+        doctor_code = None
+        doctor_name = None
+        target_branch_id = None
+
+    # Получение информации о враче с поддержкой нескольких врачей (продолжение существующей логики)
+    if not doctor_code:
+        # Сначала проверяем в записях
+        appointment = Appointment.objects.filter(patient=patient, is_active=True).first()
+        if appointment:
+            if appointment.doctor:
+                doctor_code = appointment.doctor.doctor_code
+                doctor_name = appointment.doctor.full_name
+                logger.info(f"Найден доктор из активной записи: {doctor_name} (ID: {doctor_code})")
+
+            # Получаем филиал
+            if appointment.clinic:
+                target_branch_id = appointment.clinic.clinic_id
+                logger.info(f"Найден TOFILIAL из записи: {target_branch_id}")
+
+        # Если не нашли в записях, проверяем в очереди
+        if doctor_code is None:
+            queue_entry = QueueInfo.objects.filter(patient=patient).first()
+            if queue_entry:
+                if queue_entry.doctor_code:
+                    doctor_code = queue_entry.doctor_code
+                    doctor_name = queue_entry.doctor_name
+                    logger.info(f"Найден доктор из очереди: {doctor_name} (ID: {doctor_code})")
+
+                # Получаем филиал
+                if queue_entry.target_branch:
+                    target_branch_id = queue_entry.target_branch.clinic_id
+                    logger.info(f"Найден TOFILIAL из очереди: {target_branch_id}")
+
+                # Получаем отделение
+                if queue_entry.department_number:
+                    logger.info(f"Найдено отделение {queue_entry.department_number} в очереди пациента {patient_code}")
+
+        # Если не нашли врача, проверяем последнего использованного врача
+        if doctor_code is None and patient.last_used_doctor:
+            doctor_code = patient.last_used_doctor.doctor_code
+            doctor_name = patient.last_used_doctor.full_name
+            logger.info(f"Используем последнего использованного врача: {doctor_name} (ID: {doctor_code})")
 
     # Если до сих пор нет доктора, логируем ошибку
     if doctor_code is None:
@@ -215,21 +290,101 @@ def which_time_in_certain_day(patient_code, date_time):
                     referral_message = check_text.text if check_text is not None else "Требуется направление"
                     logger.warning(f"Для врача {doctor_code} требуется направление: {referral_message}")
 
-        # Если требуется направление, возвращаем ошибку с предложением выбрать другого врача
+        # Если требуется направление, нужно попробовать другого врача
         if requires_referral:
-            # Проверяем, это вызов для отображения или для резервирования
-            # Если для резервирования, то нужно вернуть ошибку
-            # Если для отображения, то можно продолжить и показать слоты (с предупреждением)
-            if response_status.startswith('which_time'):
-                logger.warning(f"Врач {doctor_code} требует направление, но покажем слоты")
-                # Продолжаем обработку ниже
+            logger.warning(f"Врач {doctor_code} требует направление, пробуем найти другого доступного врача")
+
+            # Получаем все доступные расписания для пациента
+            schedule_result = get_patient_doctor_schedule(patient_code, days_horizon=1)
+
+            if schedule_result.get('success', False) and schedule_result.get('by_doctor'):
+                # Перебираем всех врачей и ищем того, кто не требует направления
+                tried_alternate_doctor = False
+
+                for alt_doctor_code, doctor_data in schedule_result.get('by_doctor', {}).items():
+                    # Пропускаем текущего врача, который требует направление
+                    if alt_doctor_code == doctor_code:
+                        continue
+
+                    # Проверяем, есть ли у этого врача доступные слоты на нужную дату
+                    has_slots_for_date = False
+                    for schedule in doctor_data.get('schedules', []):
+                        if schedule.get('date_iso') == date_str and schedule.get('has_free_slots', False):
+                            has_slots_for_date = True
+                            break
+
+                    if has_slots_for_date:
+                        # Проверяем, требует ли этот врач направление
+                        requires_referral_alt = False
+                        for schedule in doctor_data.get('schedules', []):
+                            if 'check_data' in schedule:
+                                check_data_list = schedule.get('check_data', [])
+                                for check in check_data_list:
+                                    if check.get('check_code') == '2':
+                                        requires_referral_alt = True
+                                        break
+                            if requires_referral_alt:
+                                break
+
+                        # Если этот врач не требует направление, используем его
+                        if not requires_referral_alt:
+                            doctor_code = alt_doctor_code
+                            doctor_name = doctor_data.get('doctor_name', f"Врач {alt_doctor_code}")
+                            department_id = doctor_data.get('department_id')
+                            logger.info(
+                                f"✅ Найден альтернативный врач, не требующий направления: {doctor_name} (ID: {doctor_code})")
+
+                            # Обновляем XML-запрос с новым врачом
+                            xml_request = f'''
+                            <WEB_SCHEDULE xmlns="http://sdsys.ru/">
+                              <MSH>
+                                <MSH.3></MSH.3>
+                                <MSH.7>
+                                  <TS.1>{datetime.now().strftime('%Y%m%d%H%M')}</TS.1>
+                                </MSH.7>
+                                <MSH.9>
+                                  <MSG.1>WEB</MSG.1>
+                                  <MSG.2>SCHEDULE</MSG.2>
+                                </MSH.9>
+                                <MSH.10>f2e89dbc1e813cb680d2f847</MSH.10>
+                                <MSH.18>UTF-8</MSH.18>
+                                <MSH.99>{target_branch_id}</MSH.99>
+                              </MSH>
+                              <SCHEDULE_IN>
+                                <INDOCTLIST>{doctor_code}</INDOCTLIST>
+                                <BDATE>{date_time_obj.strftime('%Y%m%d')}</BDATE>
+                                <FDATE>{date_time_obj.strftime('%Y%m%d')}</FDATE>
+                                <EXTINTERV>30</EXTINTERV>
+                                <SCHLIST/>
+                              </SCHEDULE_IN>
+                            </WEB_SCHEDULE>
+                            '''
+
+                            logger.info(f"Повторный запрос с альтернативным врачом: \n{xml_request}")
+
+                            # Выполняем новый запрос с альтернативным врачом
+                            response = requests.post(
+                                url=infoclinica_api_url,
+                                headers={'X-Forwarded-Host': f'{infoclinica_x_forwarded_host}',
+                                         'Content-Type': 'text/xml'},
+                                data=xml_request,
+                                cert=(cert_file_path, key_file_path)
+                            )
+
+                            if response.status_code == 200:
+                                logger.info(f"Получен ответ для альтернативного врача: {response.status_code}")
+                                root = ET.fromstring(response.text)
+                                tried_alternate_doctor = True
+                                requires_referral = False
+                                break
+
+                # Если не удалось найти альтернативного врача, продолжаем с текущим (показываем доступные слоты, но с предупреждением)
+                if not tried_alternate_doctor:
+                    logger.warning(f"Не найдено альтернативных врачей без требования направления, продолжаем с текущим")
+                    # Продолжаем обработку ниже с предупреждением
             else:
-                return JsonResponse({
-                    'status': 'error_referral_required',
-                    'message': referral_message,
-                    'doctor_code': doctor_code,
-                    'doctor_name': formatted_doc_name_final
-                })
+                logger.warning(f"Не удалось получить список доступных врачей, продолжаем с текущим")
+                # Продолжаем обработку ниже с предупреждением
 
         free_time_intervals = []
         schedint = root.find('.//ns:SCHEDINT', namespace)
@@ -262,15 +417,33 @@ def which_time_in_certain_day(patient_code, date_time):
         ).delete()
 
         # Затем сохраняем новые
-        doctor_obj = appointment.doctor if appointment and appointment.doctor else None
+        # Получаем объект врача
+        doctor_obj = None
         clinic_obj = None
+
+        # Получаем объект врача если есть doctor_code
+        if doctor_code:
+            try:
+                doctor_obj = Doctor.objects.get(doctor_code=doctor_code)
+            except Doctor.DoesNotExist:
+                # Если врач не существует в БД, создадим его запись
+                doctor_obj = Doctor.objects.create(
+                    doctor_code=doctor_code,
+                    full_name=doctor_name if doctor_name else f"Врач {doctor_code}"
+                )
+                logger.info(f"Создан новый врач в БД: {doctor_obj.full_name} (ID: {doctor_code})")
 
         # Получаем объект клиники по target_branch_id
         if target_branch_id:
             try:
                 clinic_obj = Clinic.objects.get(clinic_id=target_branch_id)
             except Clinic.DoesNotExist:
-                logger.warning(f"Клиника с ID {target_branch_id} не найдена")
+                # Если клиника не существует, создадим её запись
+                clinic_obj = Clinic.objects.create(
+                    clinic_id=target_branch_id,
+                    name=f"Клиника {target_branch_id}"
+                )
+                logger.info(f"Создана новая клиника в БД: ID {target_branch_id}")
 
         for interval in free_time_intervals:
             time_str = interval["start_time"]
@@ -307,6 +480,16 @@ def which_time_in_certain_day(patient_code, date_time):
                 'specialist_name': formatted_doc_name_final,
                 'requires_referral': requires_referral,
                 'referral_message': referral_message if requires_referral else None
+            })
+
+        # Если после всех попыток найти другого врача у нас все еще есть врач с ограничениями,
+        # и это вызов для резервирования (не для просмотра), вернем сообщение об ошибке
+        if has_restrictions and not response_status.startswith('which_time'):
+            return JsonResponse({
+                'status': 'error_restrictions',
+                'message': restriction_message,
+                'doctor_code': doctor_code,
+                'doctor_name': formatted_doc_name_final
             })
 
         # Формирование ответа
