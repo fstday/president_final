@@ -283,41 +283,103 @@ def compare_times_for_redis(free_intervals, user_time, user_date):
 def compare_and_suggest_times(free_intervals, user_time, user_date):
     """
     Возвращает все доступные времена на выбранную дату.
+    Улучшенная версия для обработки различных форматов входных данных.
 
     :param free_intervals: Список свободных интервалов времени
-    :param user_time: Время пользователя в формате 'HH:MM:SS' или объект time
+    :param user_time: Время пользователя в формате 'HH:MM:SS' или 'HH:MM' или объект time
     :param user_date: Дата в формате 'YYYY-MM-DD'
     :return: Список всех доступных времен с датой
     """
     logger.info(f'Нахожусь в функции compare_and_suggest_times\nЖелаемое время пользователя: {user_time}\n')
 
     # Проверяем тип user_time и преобразуем его, если это необходимо
+    user_time_obj = None
     if isinstance(user_time, str):
-        user_time_obj = datetime.strptime(user_time, '%H:%M:%S').time()
+        try:
+            # Пробуем разные форматы времени
+            if ':' in user_time:
+                parts = user_time.split(':')
+                if len(parts) == 2:  # HH:MM
+                    user_time_obj = time(int(parts[0]), int(parts[1]))
+                elif len(parts) == 3:  # HH:MM:SS
+                    user_time_obj = time(int(parts[0]), int(parts[1]), int(parts[2]))
+            else:
+                # Если не удалось распознать формат, логируем ошибку
+                logger.warning(f"Некорректный формат времени: {user_time}")
+                user_time_obj = time(0, 0)  # Время по умолчанию
+        except ValueError as e:
+            logger.warning(f"Ошибка преобразования времени: {e}, {user_time}")
+            user_time_obj = time(0, 0)  # Время по умолчанию
     elif isinstance(user_time, time):
         user_time_obj = user_time
+    elif isinstance(user_time, datetime):
+        user_time_obj = user_time.time()
     else:
-        logger.info(f"Некорректный тип user_time: {type(user_time)}")
-        raise ValueError("user_time должен быть строкой или объектом time")
+        logger.warning(f"Некорректный тип user_time: {type(user_time)}")
+        user_time_obj = time(0, 0)  # Время по умолчанию
 
-    # Собираем все доступные времена
+    logger.info(f"Нормализованное время пользователя: {user_time_obj}")
+
+    # Собираем все доступные времена с проверкой формата интервалов
     available_times = []
 
-    for interval in free_intervals:
-        start_time = normalize_time_for_receptions(interval['start_time'])
+    # Проверяем структуру free_intervals для обработки различных форматов
+    if not free_intervals:
+        logger.warning("Пустой список интервалов!")
+        return []
 
-        # Пропускаем интервалы меньше 09:00 и больше или равно 21:00
-        if start_time < time(9, 0) or start_time >= time(21, 0):
-            continue
+    if isinstance(free_intervals, list):
+        for interval in free_intervals:
+            try:
+                # Определяем формат интервала
+                if isinstance(interval, dict) and 'start_time' in interval:
+                    # Формат {'start_time': '9:00', 'end_time': '9:30'}
+                    start_time_str = interval['start_time']
+                elif isinstance(interval, str):
+                    # Формат '9:00'
+                    start_time_str = interval
+                else:
+                    logger.warning(f"Неизвестный формат интервала: {interval}")
+                    continue
 
-        # Пропускаем сравнение с занятым временем
-        if start_time == user_time_obj:
-            continue
+                # Нормализуем start_time
+                if ':' in start_time_str:
+                    parts = start_time_str.split(':')
+                    if len(parts) == 2:
+                        hour, minute = map(int, parts)
+                        start_time = time(hour, minute)
+                    else:
+                        logger.warning(f"Неверный формат времени: {start_time_str}")
+                        continue
+                else:
+                    logger.warning(f"Неверный формат времени: {start_time_str}")
+                    continue
 
-        available_times.append(format_time_with_date(user_date, start_time))
+                # Проверяем время на диапазон 9:00-21:00
+                if start_time < time(9, 0) or start_time >= time(21, 0):
+                    continue
 
-    logger.info(f"Время занято. Предлагаем {len(available_times)} свободных времен:")
+                # Пропускаем сравнение с занятым временем
+                if start_time == user_time_obj:
+                    continue
+
+                # Форматируем и добавляем доступное время
+                available_time = f"{user_date} {start_time.strftime('%H:%M')}"
+                available_times.append(available_time)
+            except Exception as e:
+                logger.error(f"Ошибка при обработке интервала {interval}: {e}")
+
+    # Если не удалось обработать интервалы, возвращаем пустой список
+    if not available_times:
+        logger.warning("Не удалось найти доступные времена")
+        return []
+
+    # Сортируем времена
+    available_times.sort()
+
+    logger.info(f"Найдено {len(available_times)} свободных времен")
     return available_times
+
 
 def redis_reception_appointment(patient_id, appointment_time):
     """
@@ -373,3 +435,92 @@ def format_doctor_name(patient_code: str) -> str:
         logger.error(f"Ошибка в format_doctor_name: {e}")
 
     return "Специалист"
+
+
+def select_best_doctor_for_time(patient_code, requested_date, requested_time):
+    """
+    Выбирает наиболее подходящего врача для запрошенного времени
+    из доступных в отделении.
+
+    Args:
+        patient_code (str): Код пациента
+        requested_date (str): Запрошенная дата в формате 'YYYY-MM-DD'
+        requested_time (str): Запрошенное время в формате 'HH:MM'
+
+    Returns:
+        tuple: (doctor_code, clinic_id, department_id, schedident)
+    """
+    from reminder.infoclinica_requests.schedule.schedule_cache import get_cached_schedule
+
+    logger.info(f"Выбор врача для пациента {patient_code} на {requested_date} {requested_time}")
+
+    # Получаем кэшированные данные или запрашиваем заново
+    cached_data = get_cached_schedule(patient_code)
+
+    if not cached_data or 'by_doctor' not in cached_data.get('data', cached_data):
+        # Нет кэша или кэш не содержит данных о врачах - делаем новый запрос
+        from reminder.infoclinica_requests.schedule.doct_schedule_free import get_patient_doctor_schedule
+
+        schedule_result = get_patient_doctor_schedule(patient_code, days_horizon=1)
+        if schedule_result.get('success', False):
+            cache_schedule(patient_code, schedule_result)
+            cached_data = get_cached_schedule(patient_code)
+
+    if not cached_data or 'by_doctor' not in cached_data.get('data', cached_data):
+        logger.error("Не удалось получить данные о врачах")
+        return None, None, None, None
+
+    by_doctor = cached_data.get('data', cached_data)['by_doctor']
+    if not by_doctor:
+        logger.warning("Нет данных о врачах в кэше")
+        return None, None, None, None
+
+    # Конвертируем время запроса в минуты от начала дня
+    req_hour, req_min = map(int, requested_time.split(':'))
+    req_minutes = req_hour * 60 + req_min
+
+    # Находим врачей с доступными слотами на запрашиваемую дату и время
+    suitable_doctors = []
+
+    for doc_code, doctor_data in by_doctor.items():
+        for schedule in doctor_data.get('schedules', []):
+            if schedule.get('date_iso') != requested_date or not schedule.get('has_free_slots', False):
+                continue
+
+            # Проверяем, имеет ли этот врач слот в указанное время
+            begin_hour = schedule.get('begin_hour', 0)
+            begin_min = schedule.get('begin_min', 0)
+            end_hour = schedule.get('end_hour', 0)
+            end_min = schedule.get('end_min', 0)
+
+            # Преобразуем в минуты для сравнения
+            begin_minutes = begin_hour * 60 + begin_min
+            end_minutes = end_hour * 60 + end_min
+
+            # Если запрошенное время попадает в интервал работы
+            if begin_minutes <= req_minutes < end_minutes:
+                suitable_doctors.append({
+                    'doctor_code': doc_code,
+                    'doctor_name': doctor_data.get('doctor_name'),
+                    'department_id': doctor_data.get('department_id'),
+                    'clinic_id': schedule.get('clinic_id'),
+                    'schedule_id': schedule.get('schedule_id'),
+                    'free_count': schedule.get('free_count', 0),
+                    'time_diff': abs(req_minutes - begin_minutes)  # Насколько близко к началу рабочего дня
+                })
+
+    if not suitable_doctors:
+        logger.warning(f"Не найдено подходящих врачей на {requested_date} {requested_time}")
+        return None, None, None, None
+
+    # Выбираем врача с наибольшим количеством свободных слотов или ближайшего по времени
+    selected = min(suitable_doctors, key=lambda x: x['time_diff'])
+
+    logger.info(f"Выбран врач {selected['doctor_code']} ({selected['doctor_name']}) для записи")
+
+    return (
+        selected['doctor_code'],
+        selected['clinic_id'],
+        selected['department_id'],
+        selected['schedule_id']
+    )

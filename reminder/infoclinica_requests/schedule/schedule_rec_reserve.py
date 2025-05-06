@@ -1,3 +1,5 @@
+import json
+
 from dotenv import load_dotenv
 import requests
 import os
@@ -5,7 +7,7 @@ import django
 import logging
 import xml.etree.ElementTree as ET
 import redis
-from datetime import datetime
+from datetime import datetime, time
 from django.utils import timezone
 from reminder.models import *
 from reminder.infoclinica_requests.utils import compare_times_for_redis, compare_times, redis_reception_appointment, \
@@ -34,26 +36,14 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                          is_reschedule=False, schedid=None):
     """
     Функция резервирует время при его успешном нахождении в свободных окошках.
-    Отправляет XML запрос и резервирует свободное время за клиентом. Метод: WEB_SCHEDULE_REC_RESERVE
-    Модифицирована для правильного использования TOFILIAL (целевой клиники) из БД.
-
-    :param result_time: Выбранное время для записи
-    :param doctor_id: ID врача
-    :param date_part: Дата записи
-    :param patient_id: ID пациента
-    :param date_obj: Объект datetime
-    :param schedident_text: ID графика работы
-    :param free_intervals: Список свободных интервалов
-    :param is_reschedule: Флаг, указывающий, является ли это переносом записи
-    :param schedid: ID существующей записи (только для переноса)
-    :return: Словарь с результатом операции
+    Отправляет XML запрос и резервирует свободное время за клиентом.
+    Исправленная версия для работы с несколькими врачами.
     """
-
     try:
         # Получаем информацию о пациенте
         found_patient = Patient.objects.get(patient_code=patient_id)
 
-        # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Получаем target_branch (TOFILIAL) из очереди пациента
+        # КРИТИЧЕСКИ ВАЖНО: Получаем target_branch (TOFILIAL) из очереди пациента
         target_branch_id = None
 
         # Сначала ищем в активных очередях
@@ -88,6 +78,12 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
             logger.info(f"Найден врач: {doctor.full_name}")
         except Doctor.DoesNotExist:
             logger.warning(f"Врач с кодом {doctor_id} не найден")
+            # Пробуем создать объект врача с минимальной информацией
+            doctor = Doctor.objects.create(
+                doctor_code=doctor_id,
+                full_name=f"Врач {doctor_id}"
+            )
+            logger.info(f"Создан новый врач с кодом {doctor_id}")
 
         # Найти клинику по target_branch_id
         clinic = None
@@ -96,6 +92,12 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
             logger.info(f"Найдена клиника: {clinic.name}")
         except Clinic.DoesNotExist:
             logger.warning(f"Клиника с ID {target_branch_id} не найдена")
+            # Пробуем создать объект клиники с минимальной информацией
+            clinic = Clinic.objects.create(
+                clinic_id=target_branch_id,
+                name=f"Клиника {target_branch_id}"
+            )
+            logger.info(f"Создана новая клиника с ID {target_branch_id}")
 
         # Получить причину и отделение из QueueInfo, если возможно
         reason = None
@@ -105,6 +107,14 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
             # Получаем причину из очереди
             reason = latest_queue.reason
             if reason:
+                logger.info(f"Получена причина из очереди: {reason.reason_name}")
+            else:
+                # Создаем причину "по умолчанию" если нет
+                from reminder.models import Reason
+                reason, _ = Reason.objects.get_or_create(
+                    reason_code=1,
+                    defaults={'reason_name': 'Неизвестная причина'}
+                )
                 logger.info(f"Получена причина из очереди: {reason.reason_name}")
 
             # Если у доктора есть отделение, используем его
@@ -129,16 +139,78 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
     }
 
     logger.info(f'DATE OBJECT {date_obj}')
+
+    # КРИТИЧЕСКИ ВАЖНО: Правильная обработка даты/времени
+    # Если date_obj - это строка, нормализуем её в datetime
+    if isinstance(date_obj, str):
+        try:
+            # Пробуем различные форматы
+            if ' ' in date_obj:
+                try:
+                    date_obj = datetime.strptime(date_obj, '%Y-%m-%d %H:%M')
+                except ValueError:
+                    try:
+                        date_obj = datetime.strptime(date_obj, '%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        return {'status': 'error', 'message': f'Неверный формат даты: {date_obj}'}
+            else:
+                # Это только дата без времени
+                date_obj = datetime.strptime(date_obj, '%Y-%m-%d')
+        except ValueError as e:
+            return {'status': 'error', 'message': f'Ошибка преобразования даты: {str(e)}'}
+
+    # Если result_time - это строка, нормализуем её
     if isinstance(result_time, str):
         try:
-            result_time = datetime.strptime(result_time, '%Y-%m-%d %H:%M')
-        except ValueError:
-            return {'status': 'error', 'message': 'Неверный формат даты. Ожидаемый формат: YYYY-MM-DD HH:MM.'}
+            # Если это полная дата/время
+            if ' ' in result_time:
+                try:
+                    result_time = datetime.strptime(result_time, '%Y-%m-%d %H:%M')
+                except ValueError:
+                    try:
+                        result_time = datetime.strptime(result_time, '%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        return {'status': 'error', 'message': f'Неверный формат времени: {result_time}'}
+            else:
+                # Это только время без даты, используем дату из date_part
+                if ':' in result_time:
+                    hour, minute = map(int, result_time.split(':')[:2])
 
+                    # Получаем дату из date_part
+                    if isinstance(date_part, str) and len(date_part) >= 10:
+                        date_only = datetime.strptime(date_part[:10], '%Y-%m-%d').date()
+                    elif isinstance(date_obj, datetime):
+                        date_only = date_obj.date()
+                    else:
+                        return {'status': 'error', 'message': 'Не удалось определить дату'}
+
+                    # Создаем полный datetime
+                    result_time = datetime.combine(date_only, time(hour, minute))
+                else:
+                    return {'status': 'error', 'message': f'Неверный формат времени: {result_time}'}
+        except ValueError as e:
+            return {'status': 'error', 'message': f'Ошибка преобразования времени: {str(e)}'}
+    elif not isinstance(result_time, datetime):
+        return {'status': 'error', 'message': 'result_time должен быть строкой или объектом datetime'}
+
+    # Гарантируем, что date_obj и result_time совпадают по времени
+    # Используем время из result_time, оно более точное
     bhour, bmin = result_time.hour, result_time.minute
     logger.info(f"Время для резервирования: {bhour}:{bmin}")
 
-    workdate = date_part.replace('-', '')  # Преобразуем в формат без '-' для отправки XML запроса
+    # Если date_part - это объект datetime, преобразуем его в строку
+    if isinstance(date_part, datetime):
+        date_part = date_part.strftime('%Y-%m-%d')
+
+    # Проверяем, что date_part имеет правильный формат
+    if not isinstance(date_part, str) or len(date_part) < 10:
+        if isinstance(result_time, datetime):
+            date_part = result_time.strftime('%Y-%m-%d')
+        else:
+            return {'status': 'error', 'message': 'Неверный формат date_part'}
+
+    # Преобразуем в формат без '-' для XML запроса
+    workdate = date_part.replace('-', '')
 
     # Устанавливаем FHOUR и FMIN на 30 минут позже
     fmin = bmin + 30
@@ -152,7 +224,7 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
     if fhour >= 24:
         fhour -= 24
 
-    # Форматируем часы и минуты для BHOUR и BMIN
+    # Гарантируем, что часы и минуты имеют двузначный формат
     bhour_str = str(bhour).zfill(2)
     bmin_str = str(bmin).zfill(2)
     fhour_str = str(fhour).zfill(2)
@@ -210,7 +282,7 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
     </WEB_SCHEDULE_REC_RESERVE>
     """
 
-    logger.info(f"Полный XML-запрос RESERVE: {xml_request}")
+    logger.info(f"Полный XML-запрос schedule_rec_reserve: {xml_request}")
     logger.info(f"Параметры: DCODE={doctor_id}, WORKDATE={workdate}, BHOUR={bhour_str}, BMIN={bmin_str}")
     logger.info(
         f"Отправляем запрос на резервирование: DCODE={doctor_id}, WORKDATE={workdate}, BHOUR={bhour_str}, BMIN={bmin_str}, TOFILIAL={target_branch_id}")
@@ -225,99 +297,189 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
 
         if response.status_code == 200:
             try:
-                logger.debug(f"Тело ответа: {response.text[:500]}...")  # Логируем первые 500 символов ответа
+                logger.info(f"Полный ответ schedule_rec_reserve: \n{response.text}")
                 root = ET.fromstring(response.text)
                 namespace = {'ns': 'http://sdsys.ru/'}
 
+                # Ищем код результата и комментарий
                 sp_result_code = root.find('.//ns:SPRESULT', namespace)
                 sp_comment_text = root.find('.//ns:SPCOMMENT', namespace)
 
-                sp_result = int(sp_result_code.text) if sp_result_code is not None else None
+                # Проверяем, что код результата существует
+                if sp_result_code is None:
+                    logger.error("SPRESULT не найден в ответе сервера")
+                    return {
+                        'status': 'error',
+                        'message': 'SPRESULT не найден в ответе сервера'
+                    }
 
-                if sp_result is not None:
-                    if sp_result == 1:
-                        schedid_element = root.find(".//ns:SCHEDID", namespace)
-                        if schedid_element is not None and schedid_element.text:
+                sp_result = int(sp_result_code.text)
+
+                # Получаем комментарий, если есть
+                sp_comment = sp_comment_text.text if sp_comment_text is not None else "Нет комментария"
+
+                logger.info(f"Код результата SPRESULT: {sp_result}, комментарий: {sp_comment}")
+
+                if sp_result == 1:
+                    # Успешное резервирование
+                    schedid_element = root.find(".//ns:SCHEDID", namespace)
+                    schedid_value = None
+
+                    if schedid_element is not None and schedid_element.text:
+                        try:
                             schedid_value = int(schedid_element.text)
+                            logger.info(f"Получен ID записи (SCHEDID): {schedid_value}")
+                        except ValueError:
+                            logger.warning(f"Не удалось преобразовать SCHEDID в число: {schedid_element.text}")
 
-                            # Создаем или обновляем запись на прием СО ВСЕМИ СВЯЗЯМИ
+                    # Если это новая запись или мы получили SCHEDID
+                    if not is_reschedule or schedid_value:
+                        # Формируем объект записи
+                        appointment_data = {
+                            'patient': found_patient,
+                            'doctor': doctor,
+                            'clinic': clinic,
+                            'department': department,
+                            'reason': reason,
+                            'is_infoclinica_id': True,
+                            'start_time': date_obj,
+                            'end_time': date_obj + timedelta(minutes=30),
+                            'is_active': True
+                        }
+
+                        if schedid_value:
+                            # Если получили ID записи, используем его
                             appointment, created = Appointment.objects.update_or_create(
                                 appointment_id=schedid_value,
-                                defaults={
-                                    'patient': found_patient,
-                                    'doctor': doctor,
-                                    'clinic': clinic,  # TOFILIAL
-                                    'department': department,
-                                    'reason': reason,
-                                    'is_infoclinica_id': True,
-                                    'start_time': date_obj,
-                                    'end_time': date_obj + timezone.timedelta(minutes=30),
-                                    'is_active': True
-                                }
+                                defaults=appointment_data
                             )
                             logger.info(f"{'Создана' if created else 'Обновлена'} запись на прием: {appointment}")
+                        else:
+                            # Если не получили ID, создаем запись без привязки к ID
+                            appointment = Appointment.objects.create(**appointment_data)
+                            logger.info(f"Создана запись без ID: {appointment}")
 
-                        # Обновляем данные, если это перенос
-                        if is_reschedule and schedid:
-                            try:
-                                # Поиск существующей записи
-                                old_appointment = Appointment.objects.get(appointment_id=schedid)
+                    # Обновляем данные, если это перенос
+                    if is_reschedule and schedid:
+                        try:
+                            # Поиск существующей записи
+                            old_appointment = Appointment.objects.get(appointment_id=schedid)
 
-                                # Удаление старого времени из Redis
-                                previous_appointment_time_str = old_appointment.start_time.strftime('%Y-%m-%d %H:%M:%S')
-                                redis_client.delete(previous_appointment_time_str)
+                            # Удаление старого времени из Redis
+                            previous_appointment_time_str = old_appointment.start_time.strftime('%Y-%m-%d %H:%M:%S')
+                            redis_client.delete(previous_appointment_time_str)
 
-                                # Обновляем время и дату
-                                old_appointment.start_time = date_obj
-                                old_appointment.end_time = date_obj + timezone.timedelta(minutes=30)
-                                old_appointment.save()
-                            except Appointment.DoesNotExist:
-                                logger.warning(f"Запись с ID {schedid} не найдена в Appointment")
+                            # Обновляем время и дату
+                            old_appointment.start_time = date_obj
+                            old_appointment.end_time = date_obj + timedelta(minutes=30)
+                            old_appointment.save()
 
-                        # Заносим время и дату в Redis
-                        appointment_time_str = date_obj.strftime('%Y-%m-%d %H:%M:%S')
-                        redis_reception_appointment(patient_id=patient_id, appointment_time=appointment_time_str)
+                            logger.info(f"Обновлена существующая запись: {old_appointment}")
+                        except Appointment.DoesNotExist:
+                            logger.warning(f"Запись с ID {schedid} не найдена в Appointment")
 
-                        return {
-                             'status': 'success_schedule',
-                             'message': f'Запись произведена успешно на {appointment_time_str}',
-                             'time': appointment_time_str,
-                             'specialist_name': doctor.full_name if doctor else "Специалист"
-                         }
+                    # Заносим время и дату в Redis
+                    appointment_time_str = date_obj.strftime('%Y-%m-%d %H:%M:%S')
+                    redis_reception_appointment(patient_id=patient_id, appointment_time=appointment_time_str)
 
-                    if sp_result == 0:
-                        logger.info('К сожалению, выбранное время было недавно занято.')
+                    # Формируем ответ
+                    return {
+                        'status': 'success_schedule',
+                        'message': f'Запись произведена успешно на {appointment_time_str}',
+                        'time': appointment_time_str,
+                        'specialist_name': doctor.full_name if doctor else "Специалист"
+                    }
 
-                        # Возвращаем все доступные времена
-                        available_times = compare_and_suggest_times(free_intervals, result_time.time(), date_part)
+                elif sp_result == 0:
+                    # Время занято - это происходит из-за конфликта с другими запросами
+                    logger.info('К сожалению, выбранное время было недавно занято.')
 
-                        answer = {
-                            'status': 'suggest_times',
-                            'suggested_times': available_times,
-                            'message': f'Время приема {result_time} занято. Возвращаю все свободные времена для записи',
-                            'action': 'reserve',
-                            'specialist_name': doctor.full_name if doctor else "Специалист"
-                        }
+                    # Проверим свободные времена еще раз через вызов which_time_in_certain_day
+                    try:
+                        from reminder.infoclinica_requests.schedule.which_time_in_certain_day import \
+                            which_time_in_certain_day
 
-                        logger.info(f"Возвращаю из schedule_rec_reserve: {answer}")
-                        return answer
+                        # Получаем текущую дату в формате YYYY-MM-DD
+                        current_date = date_obj.strftime('%Y-%m-%d') if isinstance(date_obj, datetime) else date_obj[
+                                                                                                            :10]
 
+                        # Запрашиваем свежие данные о свободных интервалах
+                        logger.info(
+                            f"Запрашиваем актуальные данные о свободных временах для {doctor_id} на {current_date}")
+                        fresh_times_result = which_time_in_certain_day(patient_id, current_date)
+
+                        # Обрабатываем результат
+                        if hasattr(fresh_times_result, 'content'):
+                            fresh_times_data = json.loads(fresh_times_result.content.decode('utf-8'))
+                        else:
+                            fresh_times_data = fresh_times_result
+
+                        # Проверяем наличие свободных времен
+                        if 'all_available_times' in fresh_times_data and fresh_times_data['all_available_times']:
+                            fresh_free_intervals = []
+                            for t in fresh_times_data['all_available_times']:
+                                start_hour, start_min = map(int, t.split(':'))
+                                # Предполагаем 30-минутные интервалы
+                                end_hour = start_hour
+                                end_min = start_min + 30
+                                if end_min >= 60:
+                                    end_min -= 60
+                                    end_hour += 1
+
+                                fresh_free_intervals.append({
+                                    'start_time': t,
+                                    'end_time': f"{end_hour:02d}:{end_min:02d}"
+                                })
+
+                            # Используем актуальные свободные интервалы вместо устаревших
+                            free_intervals = fresh_free_intervals
+                            logger.info(f"Получено {len(free_intervals)} актуальных свободных интервалов")
+                    except Exception as e:
+                        logger.error(f"Ошибка при обновлении свободных интервалов: {e}")
+
+                    # Определяем ближайшие доступные времена
+                    if isinstance(result_time, datetime):
+                        requested_time_obj = result_time.time()
                     else:
-                        logger.info('Пришел неверный код')
-                        return {
-                            'status': 'incorrect_code',
-                            'message': 'Пришел неверный код'
-                        }
+                        requested_time_obj = datetime.strptime(str(result_time)[:5], "%H:%M").time()
+
+                    # Возвращаем все доступные времена
+                    available_times = compare_and_suggest_times(free_intervals, requested_time_obj, date_part)
+
+                    answer = {
+                        'status': 'suggest_times',
+                        'suggested_times': available_times,
+                        'message': f'Время приема {result_time} занято. Возвращаю все свободные времена для записи',
+                        'action': 'reserve',
+                        'specialist_name': doctor.full_name if doctor else "Специалист"
+                    }
+
+                    logger.info(f"Возвращаю из schedule_rec_reserve: {answer}")
+                    return answer
+                else:
+                    # Другие коды ошибок
+                    logger.warning(f'Получен код ошибки: {sp_result}, комментарий: {sp_comment}')
+                    return {
+                        'status': 'error',
+                        'message': f'Ошибка при резервировании: {sp_comment}'
+                    }
 
             except ET.ParseError as e:
-                logger.info(f'Ошибка при парсинге XML: {e}')
+                logger.error(f'Ошибка при парсинге XML: {e}')
                 return {
                     'status': 'error',
                     'message': f'Ошибка при парсинге XML: {e}'
                 }
+        else:
+            # Ошибка HTTP
+            logger.error(f'HTTP ошибка: {response.status_code}, ответ: {response.text}')
+            return {
+                'status': 'error',
+                'message': f'HTTP ошибка: {response.status_code}'
+            }
 
     except requests.exceptions.RequestException as e:
-        logger.info(f'Ошибка при выполнении запроса: {e}')
+        logger.error(f'Ошибка при выполнении запроса: {e}')
         return {
             'status': 'error',
             'message': f'Ошибка при выполнении запроса: {e}'

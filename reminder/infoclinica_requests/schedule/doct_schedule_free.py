@@ -17,7 +17,7 @@ from reminder.infoclinica_requests.schedule.schedule_cache import (
 logger = logging.getLogger(__name__)
 
 # Импорты моделей
-from reminder.models import Clinic, Doctor, Department, Patient, QueueInfo
+from reminder.models import Clinic, Doctor, Department, Patient, QueueInfo, PatientDoctorAssociation
 from reminder.infoclinica_requests.utils import generate_msh_10
 
 # Загрузка переменных окружения
@@ -130,6 +130,10 @@ def get_patient_doctor_schedule(patient_code, days_horizon=7, online_mode=0, ret
         if response.status_code == 200:
             logger.info(f"Получен ответ от сервера (длина: {len(response.text)} символов)")
 
+            logger.info(f"Полный ответ DOCT_SCHEDULE_FREE: \n{response.text[:1000]}...")
+            if len(response.text) > 1000:
+                logger.info(f"... (оставшаяся часть ответа из {len(response.text)} символов)")
+
             # Если запрошен сырой ответ, возвращаем его
             if return_raw:
                 return response.text
@@ -162,7 +166,8 @@ def get_patient_doctor_schedule(patient_code, days_horizon=7, online_mode=0, ret
 
 def get_available_doctor_by_patient(patient_code):
     """
-    Определяет доступного врача для пациента
+    Определяет доступного врача для пациента с улучшенной поддержкой
+    множественных врачей из одного отделения.
 
     Параметры:
     patient_code (int): Код пациента
@@ -170,7 +175,6 @@ def get_available_doctor_by_patient(patient_code):
     Возвращает:
     tuple: (doctor_code, department_id, clinic_id)
     """
-    # Пытаемся найти связанную информацию о пациенте
     try:
         # Проверяем очереди пациента
         queues = QueueInfo.objects.filter(patient__patient_code=patient_code).order_by('-created_at')
@@ -181,6 +185,7 @@ def get_available_doctor_by_patient(patient_code):
             # Приоритеты:
             # 1. Врач + отделение + филиал из очереди
             if latest_queue.doctor_code and latest_queue.department_number and latest_queue.target_branch:
+                logger.info(f"Найден врач {latest_queue.doctor_code} в очереди пациента {patient_code}")
                 return (
                     latest_queue.doctor_code,
                     latest_queue.department_number,
@@ -189,6 +194,7 @@ def get_available_doctor_by_patient(patient_code):
 
             # 2. Врач + филиал
             if latest_queue.doctor_code and latest_queue.target_branch:
+                logger.info(f"Найден врач {latest_queue.doctor_code} и филиал в очереди пациента {patient_code}")
                 return (
                     latest_queue.doctor_code,
                     None,
@@ -197,6 +203,7 @@ def get_available_doctor_by_patient(patient_code):
 
             # 3. Отделение + филиал
             if latest_queue.department_number and latest_queue.target_branch:
+                logger.info(f"Найдено отделение {latest_queue.department_number} в очереди пациента {patient_code}")
                 return (
                     None,
                     latest_queue.department_number,
@@ -205,11 +212,32 @@ def get_available_doctor_by_patient(patient_code):
 
             # 4. Только филиал
             if latest_queue.target_branch:
+                logger.info(f"Найден только филиал в очереди пациента {patient_code}")
                 return (None, None, latest_queue.target_branch.clinic_id)
 
         # Если не нашли в очередях, проверяем пациента напрямую
         patient = Patient.objects.filter(patient_code=patient_code).first()
         if patient:
+            # Проверяем сначала последнего использованного врача
+            if patient.last_used_doctor:
+                logger.info(f"Используем последнего врача пациента: {patient.last_used_doctor.doctor_code}")
+                # Находим клинику через записи
+                latest_appointment = patient.appointments.filter(
+                    doctor=patient.last_used_doctor,
+                    is_active=True
+                ).order_by('-start_time').first()
+
+                clinic_id = latest_appointment.clinic.clinic_id if latest_appointment and latest_appointment.clinic else 1
+                department_id = None
+                if latest_appointment and latest_appointment.department:
+                    department_id = latest_appointment.department.department_id
+
+                return (
+                    patient.last_used_doctor.doctor_code,
+                    department_id,
+                    clinic_id
+                )
+
             # Проверяем активные записи пациента
             appointments = patient.appointments.filter(is_active=True).order_by('-start_time')
             if appointments.exists():
@@ -217,6 +245,7 @@ def get_available_doctor_by_patient(patient_code):
 
                 # Приоритеты как в случае с очередями
                 if latest_appointment.doctor and latest_appointment.department and latest_appointment.clinic:
+                    logger.info(f"Найден врач {latest_appointment.doctor.doctor_code} в записи пациента {patient_code}")
                     return (
                         latest_appointment.doctor.doctor_code,
                         latest_appointment.department.department_id,
@@ -224,6 +253,7 @@ def get_available_doctor_by_patient(patient_code):
                     )
 
                 if latest_appointment.doctor and latest_appointment.clinic:
+                    logger.info(f"Найден врач {latest_appointment.doctor.doctor_code} в записи пациента {patient_code}")
                     return (
                         latest_appointment.doctor.doctor_code,
                         None,
@@ -231,6 +261,8 @@ def get_available_doctor_by_patient(patient_code):
                     )
 
                 if latest_appointment.department and latest_appointment.clinic:
+                    logger.info(
+                        f"Найдено отделение {latest_appointment.department.department_id} в записи пациента {patient_code}")
                     return (
                         None,
                         latest_appointment.department.department_id,
@@ -238,19 +270,260 @@ def get_available_doctor_by_patient(patient_code):
                     )
 
                 if latest_appointment.clinic:
+                    logger.info(f"Найден только филиал в записи пациента {patient_code}")
                     return (None, None, latest_appointment.clinic.clinic_id)
+
+            # Проверяем ассоциации пациента с врачом
+            associations = PatientDoctorAssociation.objects.filter(patient=patient).order_by('-last_booking_date')
+            if associations.exists():
+                latest_association = associations.first()
+                if latest_association.doctor:
+                    logger.info(
+                        f"Найден врач {latest_association.doctor.doctor_code} в ассоциациях пациента {patient_code}")
+                    # Для клиники и отделения ищем информацию из записей
+                    latest_appointment = patient.appointments.filter(
+                        doctor=latest_association.doctor
+                    ).order_by('-start_time').first()
+
+                    clinic_id = 1  # Значение по умолчанию
+                    department_id = None
+
+                    if latest_appointment:
+                        if latest_appointment.clinic:
+                            clinic_id = latest_appointment.clinic.clinic_id
+                        if latest_appointment.department:
+                            department_id = latest_appointment.department.department_id
+
+                    return (
+                        latest_association.doctor.doctor_code,
+                        department_id,
+                        clinic_id
+                    )
 
     except Exception as e:
         logger.error(f"❌ Ошибка при определении врача для пациента: {e}", exc_info=True)
 
     # Если ничего не нашли, возвращаем None для всех значений
-    return (None, None, None)
+    logger.warning(f"Не найдено информации о враче для пациента {patient_code}")
+    return (None, None, 1)  # Возвращаем 1 как филиал по умолчанию
+
+
+def select_best_doctor_from_schedules(schedules_by_doctor, target_date_str, target_time_str=None):
+    """
+    Выбирает лучшего врача из доступных с расписанием на указанную дату и время.
+    Учитывает блокирующие ограничения (CHECKCODE=2) и выбирает врачей без них в приоритете.
+
+    Args:
+        schedules_by_doctor: Словарь расписаний по врачам
+        target_date_str: Целевая дата в формате YYYY-MM-DD
+        target_time_str: Целевое время в формате HH:MM (опционально)
+
+    Returns:
+        tuple: (doctor_code, doctor_name, department_id, schedule_id)
+    """
+    best_doctor = None
+    most_free_slots = 0
+    best_schedule_id = None
+
+    # Если указано целевое время, конвертируем его в минуты от начала дня для сравнения
+    target_minutes = None
+    if target_time_str:
+        try:
+            if isinstance(target_time_str, str) and ':' in target_time_str:
+                hours, minutes = map(int, target_time_str.split(':')[:2])
+                target_minutes = hours * 60 + minutes
+        except Exception as e:
+            logger.warning(f"Не удалось разобрать время {target_time_str}: {e}")
+
+    # Сортируем врачей по наличию блокирующих ограничений (CHECKCODE=2)
+    doctors_without_blocking = {}
+    doctors_with_blocking = {}
+
+    for doctor_code, doctor_data in schedules_by_doctor.items():
+        has_blocking = False
+
+        # Проверяем наличие ограничений в расписаниях врача
+        for schedule in doctor_data.get('schedules', []):
+            if 'check_data' in schedule:
+                check_data = schedule.get('check_data', [])
+                if isinstance(check_data, list):
+                    for check in check_data:
+                        if check.get('check_code') == '2':
+                            has_blocking = True
+                            logger.warning(
+                                f"Врач {doctor_code} ({doctor_data.get('doctor_name', '')}) имеет блокирующее ограничение (CHECKCODE=2): {check.get('check_label', '')}")
+                            break
+                elif isinstance(check_data, dict):
+                    if check_data.get('check_code') == '2':
+                        has_blocking = True
+                        logger.warning(
+                            f"Врач {doctor_code} ({doctor_data.get('doctor_name', '')}) имеет блокирующее ограничение (CHECKCODE=2): {check_data.get('check_label', '')}")
+
+            if has_blocking:
+                break
+
+        # Распределяем врачей по группам
+        if has_blocking:
+            doctors_with_blocking[doctor_code] = doctor_data
+        else:
+            doctors_without_blocking[doctor_code] = doctor_data
+
+    # Сперва пытаемся выбрать из врачей без блокирующих ограничений
+    target_doctors = doctors_without_blocking if doctors_without_blocking else doctors_with_blocking
+
+    logger.info(
+        f"Найдено {len(doctors_without_blocking)} врачей без блокирующих ограничений и {len(doctors_with_blocking)} с блокирующими ограничениями")
+
+    if not doctors_without_blocking and doctors_with_blocking:
+        logger.warning("Все доступные врачи имеют блокирующие ограничения (CHECKCODE=2)! Запись может не сработать.")
+
+    for doctor_code, doctor_data in target_doctors.items():
+        free_slots_count = 0
+        schedule_id = None
+        closest_time_diff = float('inf')
+        closest_schedule_id = None
+
+        for schedule in doctor_data.get('schedules', []):
+            if schedule.get('date_iso') == target_date_str and schedule.get('has_free_slots', False):
+                # Подсчитываем свободные слоты
+                this_slot_count = schedule.get('free_count', 0)
+                free_slots_count += this_slot_count
+
+                # Если не задано время, просто запоминаем schedident для первого или с наибольшим количеством слотов
+                if not schedule_id and this_slot_count > 0:
+                    schedule_id = schedule.get('schedule_id')
+
+                # Если задано целевое время, ищем ближайший доступный слот по времени
+                if target_minutes is not None and 'begin_hour' in schedule and 'begin_min' in schedule:
+                    begin_hour = schedule.get('begin_hour', 0)
+                    begin_min = schedule.get('begin_min', 0)
+                    slot_minutes = begin_hour * 60 + begin_min
+
+                    time_diff = abs(slot_minutes - target_minutes)
+                    if time_diff < closest_time_diff:
+                        closest_time_diff = time_diff
+                        closest_schedule_id = schedule.get('schedule_id')
+
+        # Если есть целевое время и нашли ближайший слот, используем его schedident
+        if target_minutes is not None and closest_schedule_id:
+            schedule_id = closest_schedule_id
+
+        # Решаем, лучший ли это врач
+        if free_slots_count > most_free_slots:
+            most_free_slots = free_slots_count
+            best_doctor = {
+                'doctor_code': doctor_code,
+                'doctor_name': doctor_data.get('doctor_name', ''),
+                'department_id': doctor_data.get('department_id'),
+                'schedule_id': schedule_id
+            }
+
+    if best_doctor:
+        logger.info(
+            f"Выбран врач: {best_doctor['doctor_name']} (ID: {best_doctor['doctor_code']}) с {most_free_slots} свободными слотами, schedident: {best_doctor['schedule_id']}")
+        return best_doctor['doctor_code'], best_doctor['doctor_name'], best_doctor['department_id'], best_doctor[
+            'schedule_id']
+
+    return None, None, None, None
+
+
+def check_day_has_free_slots(patient_code, date_str):
+    """
+    Проверяет, есть ли свободные слоты на конкретный день с использованием
+    кэширования результатов на 15 минут для всей недели.
+
+    Args:
+        patient_code: Код пациента
+        date_str: Дата в формате YYYY-MM-DD
+
+    Returns:
+        dict: Информация о доступности слотов
+    """
+    try:
+        # Сначала проверяем кэш для всей недели
+        cached_result = get_cached_schedule(patient_code)
+
+        if cached_result:
+            logger.info(f"Используем кэшированные данные для проверки доступности слотов на {date_str}")
+            cache_check = check_day_has_slots_from_cache(patient_code, date_str, cached_result)
+
+            # Если в кэше есть данные о доступности, возвращаем их
+            if cache_check:
+                return cache_check
+
+        # Если кэша нет или он не содержит нужного дня, делаем запрос на всю неделю
+        logger.info(f"Выполняем запрос DOCT_SCHEDULE_FREE для пациента {patient_code} на 7 дней")
+
+        # Получаем расписание на всю неделю
+        schedule_result = get_patient_doctor_schedule(patient_code, days_horizon=7)
+
+        # Кэшируем результат для всех последующих запросов (на 15 минут)
+        if schedule_result.get('success', False):
+            cache_schedule(patient_code, schedule_result)
+            logger.info(f"Результат запроса DOCT_SCHEDULE_FREE закэширован на 15 минут")
+
+        # Проверяем наличие слотов на указанную дату
+        if not schedule_result.get('success', False):
+            logger.error(f"Ошибка при получении графика: {schedule_result.get('error', 'Неизвестная ошибка')}")
+            return {
+                'has_slots': False,
+                'doctor_code': None,
+                'department_id': None,
+                'clinic_id': None
+            }
+
+        schedules = schedule_result.get('schedules', [])
+
+        # Форматируем дату для поиска
+        if date_str == "today":
+            search_date = datetime.now().date()
+        elif date_str == "tomorrow":
+            search_date = (datetime.now() + timedelta(days=1)).date()
+        else:
+            search_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+        search_date_str = search_date.strftime("%Y-%m-%d")
+
+        # Ищем слоты на указанную дату
+        has_slots = False
+        doctor_code = None
+        department_id = None
+        clinic_id = None
+
+        for slot in schedules:
+            slot_date = slot.get('date_iso')
+
+            if slot_date == search_date_str and slot.get('has_free_slots', False):
+                has_slots = True
+                doctor_code = slot.get('doctor_code')
+                department_id = slot.get('department_id')
+                clinic_id = slot.get('clinic_id')
+                break
+
+        logger.info(f"Проверка доступности слотов на {date_str}: {'Доступны' if has_slots else 'Не доступны'}")
+
+        return {
+            'has_slots': has_slots,
+            'doctor_code': doctor_code,
+            'department_id': department_id,
+            'clinic_id': clinic_id
+        }
+
+    except Exception as e:
+        logger.error(f"Ошибка при проверке доступности слотов: {e}", exc_info=True)
+        return {
+            'has_slots': False,
+            'doctor_code': None,
+            'department_id': None,
+            'clinic_id': None
+        }
 
 
 def parse_doctor_schedule_response(xml_response):
     """
     Разбор XML-ответа для запроса DOCT_SCHEDULE_FREE
     Обрабатывает как ответы с одним врачом, так и ответы со всеми врачами отделения
+    Добавлена проверка ограничений по направлению
 
     Параметры:
     xml_response (str): XML ответ от сервера
@@ -350,6 +623,27 @@ def parse_doctor_schedule_response(xml_response):
                     else:
                         schedule_data[field_name] = element.text
 
+            # Проверяем наличие ограничений (CHECKDATA)
+            check_elements = sched.findall(".//ns:CHECKDATA", namespace)
+            if check_elements:
+                check_data = []
+                for check in check_elements:
+                    check_info = {}
+                    check_code = check.find("ns:CHECKCODE", namespace)
+                    check_label = check.find("ns:CHECKLABEL", namespace)
+                    check_text = check.find("ns:CHECKTEXT", namespace)
+
+                    if check_code is not None:
+                        check_info['check_code'] = check_code.text
+                    if check_label is not None:
+                        check_info['check_label'] = check_label.text
+                    if check_text is not None:
+                        check_info['check_text'] = check_text.text
+
+                    check_data.append(check_info)
+
+                schedule_data['check_data'] = check_data
+
             # Форматируем дополнительные поля для удобства
             if 'date' in schedule_data:
                 try:
@@ -434,135 +728,6 @@ def parse_doctor_schedule_response(xml_response):
             'success': False,
             'error': f"Ошибка при разборе ответа: {str(e)}"
         }
-
-
-def check_day_has_free_slots(patient_code, date_str):
-    """
-    Проверяет, есть ли свободные слоты на конкретный день с использованием
-    кэширования результатов на 15 минут для всей недели.
-
-    Args:
-        patient_code: Код пациента
-        date_str: Дата в формате YYYY-MM-DD
-
-    Returns:
-        dict: Информация о доступности слотов
-    """
-    try:
-        # Сначала проверяем кэш для всей недели
-        cached_result = get_cached_schedule(patient_code)
-
-        if cached_result:
-            logger.info(f"Используем кэшированные данные для проверки доступности слотов на {date_str}")
-            cache_check = check_day_has_slots_from_cache(patient_code, date_str, cached_result)
-
-            # Если в кэше есть данные о доступности, возвращаем их
-            if cache_check:
-                return cache_check
-
-        # Если кэша нет или он не содержит нужного дня, делаем запрос на всю неделю
-        logger.info(f"Выполняем запрос DOCT_SCHEDULE_FREE для пациента {patient_code} на 7 дней")
-
-        # Получаем расписание на всю неделю
-        schedule_result = get_patient_doctor_schedule(patient_code, days_horizon=7)
-
-        # Кэшируем результат для всех последующих запросов (на 15 минут)
-        if schedule_result.get('success', False):
-            cache_schedule(patient_code, schedule_result)
-            logger.info(f"Результат запроса DOCT_SCHEDULE_FREE закэширован на 15 минут")
-
-        # Проверяем наличие слотов на указанную дату
-        if not schedule_result.get('success', False):
-            logger.error(f"Ошибка при получении графика: {schedule_result.get('error', 'Неизвестная ошибка')}")
-            return {
-                'has_slots': False,
-                'doctor_code': None,
-                'department_id': None,
-                'clinic_id': None
-            }
-
-        schedules = schedule_result.get('schedules', [])
-
-        # Форматируем дату для поиска
-        if date_str == "today":
-            search_date = datetime.now().date()
-        elif date_str == "tomorrow":
-            search_date = (datetime.now() + timedelta(days=1)).date()
-        else:
-            search_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-
-        search_date_str = search_date.strftime("%Y-%m-%d")
-
-        # Ищем слоты на указанную дату
-        has_slots = False
-        doctor_code = None
-        department_id = None
-        clinic_id = None
-
-        for slot in schedules:
-            slot_date = slot.get('date_iso')
-
-            if slot_date == search_date_str and slot.get('has_free_slots', False):
-                has_slots = True
-                doctor_code = slot.get('doctor_code')
-                department_id = slot.get('department_id')
-                clinic_id = slot.get('clinic_id')
-                break
-
-        logger.info(f"Проверка доступности слотов на {date_str}: {'Доступны' if has_slots else 'Не доступны'}")
-
-        return {
-            'has_slots': has_slots,
-            'doctor_code': doctor_code,
-            'department_id': department_id,
-            'clinic_id': clinic_id
-        }
-
-    except Exception as e:
-        logger.error(f"Ошибка при проверке доступности слотов: {e}", exc_info=True)
-        return {
-            'has_slots': False,
-            'doctor_code': None,
-            'department_id': None,
-            'clinic_id': None
-        }
-
-
-def select_best_doctor_from_schedules(schedules_by_doctor, target_date_str):
-    """
-    Выбирает лучшего врача из доступных с расписанием на указанную дату
-
-    Args:
-        schedules_by_doctor: Словарь расписаний по врачам
-        target_date_str: Целевая дата в формате YYYY-MM-DD
-
-    Returns:
-        tuple: (doctor_code, doctor_name, department_id)
-    """
-    best_doctor = None
-    most_free_slots = 0
-
-    for doctor_code, doctor_data in schedules_by_doctor.items():
-        free_slots_count = 0
-
-        for schedule in doctor_data['schedules']:
-            if schedule.get('date_iso') == target_date_str and schedule.get('has_free_slots', False):
-                free_slots_count += schedule.get('free_count', 0)
-
-        if free_slots_count > most_free_slots:
-            most_free_slots = free_slots_count
-            best_doctor = {
-                'doctor_code': doctor_code,
-                'doctor_name': doctor_data['doctor_name'],
-                'department_id': doctor_data['department_id']
-            }
-
-    if best_doctor:
-        logger.info(
-            f"Выбран врач: {best_doctor['doctor_name']} (ID: {best_doctor['doctor_code']}) с {most_free_slots} свободными слотами")
-        return best_doctor['doctor_code'], best_doctor['doctor_name'], best_doctor['department_id']
-
-    return None, None, None
 
 
 # Пример использования

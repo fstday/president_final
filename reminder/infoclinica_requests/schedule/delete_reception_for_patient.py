@@ -102,6 +102,7 @@ def delete_reception_for_patient(patient_id):
         </WEB_SCHEDULE_REC_REMOVE>
         '''
 
+        logger.info(f"Полный XML-запрос schedule_rec_remove_in: {xml_request}")
         # Выполняем POST-запрос
         logger.info(f"Отправка запроса на удаление записи {appointment_id} с TOFILIAL={target_branch_id}")
         response = requests.post(
@@ -115,6 +116,8 @@ def delete_reception_for_patient(patient_id):
         if response.status_code == 200:
             try:
                 root = ET.fromstring(response.text)
+                logger.debug(f"Тело ответа: {response.text[:500]}...")  # Логируем первые 500 символов ответа
+
                 namespace = {'ns': 'http://sdsys.ru/'}
 
                 # Извлекаем SPRESULT (0 - ошибка, 1 - успех) и SPCOMMENT (комментарий)

@@ -13,7 +13,7 @@ django.setup()
 from reminder.infoclinica_requests.schedule.doct_schedule_free import (
     get_patient_doctor_schedule, select_best_doctor_from_schedules, get_available_doctor_by_patient
 )
-from reminder.infoclinica_requests.schedule.schedule_cache import get_cached_schedule
+from reminder.infoclinica_requests.schedule.schedule_cache import get_cached_schedule, cache_schedule
 from reminder.models import Patient, Doctor, PatientDoctorAssociation, Appointment
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
     """
     Записывает пациента на прием к врачу с поддержкой автоматического выбора врача
+    из нескольких доступных в отделении.
     """
+    from django.db import models
+
     try:
         logger.info(
             f"Запрос на запись/перенос: patient_id={patient_id}, date_from_patient={date_from_patient}, trigger_id={trigger_id}")
@@ -44,11 +47,15 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
             try:
                 datetime_obj = datetime.strptime(date_from_patient, "%Y-%m-%d %H:%M")
             except ValueError:
-                logger.error(f"Неверный формат даты: {date_from_patient}")
-                return JsonResponse({
-                    "status": "error_change_reception_bad_date",
-                    "message": "Неверный формат даты"
-                })
+                try:
+                    # Пробуем альтернативный формат
+                    datetime_obj = datetime.strptime(date_from_patient, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    logger.error(f"Неверный формат даты: {date_from_patient}")
+                    return JsonResponse({
+                        "status": "error_change_reception_bad_date",
+                        "message": "Неверный формат даты"
+                    })
 
         if not datetime_obj:
             return JsonResponse({
@@ -62,73 +69,137 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
         # Получаем информацию о врачах
         doctor_code, department_id, clinic_id = get_available_doctor_by_patient(patient_id)
 
-        # Если у нас нет конкретного врача, пытаемся выбрать подходящего
-        if not doctor_code and department_id:
+        logger.info(
+            f"Получены данные для записи: doctor_code={doctor_code}, department_id={department_id}, clinic_id={clinic_id}")
+
+        # Если у нас нет конкретного врача, пытаемся выбрать подходящего из кэша или нового запроса
+        if not doctor_code:
+            logger.info(f"Врач не определен, пытаемся найти врача через расписание для отделения {department_id}")
+
             # Получаем кэшированные данные или делаем новый запрос
             cached_result = get_cached_schedule(patient_id)
 
-            if cached_result and 'by_doctor' in cached_result.get('data', cached_result):
-                by_doctor = cached_result.get('data', cached_result)['by_doctor']
+            if cached_result:
+                logger.info("Используем кэшированные данные для поиска врача")
+            else:
+                logger.info("Кэш не найден, запрашиваем расписание")
+                schedule_result = get_patient_doctor_schedule(patient_id, days_horizon=7)
+                if schedule_result.get('success', False):
+                    logger.info("Получен результат запроса расписания, кэшируем")
+                    cache_schedule(patient_id, schedule_result)
+                    cached_result = get_cached_schedule(patient_id)
 
-                # Находим врачей с доступными слотами на запрашиваемую дату
-                available_doctors = []
+            if cached_result:
+                # Проверяем структуру кэша - в новой версии используется by_doctor
+                if 'by_doctor' in cached_result.get('data', cached_result):
+                    by_doctor = cached_result.get('data', cached_result)['by_doctor']
+                    logger.info(f"Найдено {len(by_doctor)} врачей в кэше")
 
-                for doc_code, doctor_data in by_doctor.items():
-                    for schedule in doctor_data.get('schedules', []):
-                        if (schedule.get('date_iso') == requested_date and
-                                schedule.get('has_free_slots', False)):
-                            available_doctors.append({
-                                'doctor_code': doc_code,
-                                'doctor_name': doctor_data.get('doctor_name'),
-                                'free_count': schedule.get('free_count', 1),
-                                'department_id': doctor_data.get('department_id'),
-                                'schedules': doctor_data.get('schedules', [])
-                            })
+                    # Находим врачей с доступными слотами на запрашиваемую дату
+                    available_doctors = []
 
-                # Выбираем врача с наибольшим количеством свободных слотов
-                if available_doctors:
-                    selected_doctor = max(available_doctors, key=lambda x: x['free_count'])
-                    doctor_code = selected_doctor['doctor_code']
+                    for doc_code, doctor_data in by_doctor.items():
+                        for schedule in doctor_data.get('schedules', []):
+                            if (schedule.get('date_iso') == requested_date and
+                                    schedule.get('has_free_slots', False)):
+                                available_doctors.append({
+                                    'doctor_code': doc_code,
+                                    'doctor_name': doctor_data.get('doctor_name'),
+                                    'free_count': schedule.get('free_count', 1),
+                                    'department_id': doctor_data.get('department_id'),
+                                    'clinic_id': schedule.get('clinic_id', clinic_id),
+                                    'schedules': doctor_data.get('schedules', [])
+                                })
 
-                    # Сохраняем эту ассоциацию врача для пациента
-                    doctor_obj, _ = Doctor.objects.get_or_create(
-                        doctor_code=doctor_code,
-                        defaults={'full_name': selected_doctor['doctor_name']}
-                    )
+                    # Выбираем врача с наибольшим количеством свободных слотов
+                    if available_doctors:
+                        logger.info(f"Найдено {len(available_doctors)} врачей с доступными слотами на {requested_date}")
+                        selected_doctor = max(available_doctors, key=lambda x: x['free_count'])
+                        doctor_code = selected_doctor['doctor_code']
+                        department_id = selected_doctor.get('department_id', department_id)
+                        clinic_id = selected_doctor.get('clinic_id', clinic_id)
 
-                    # Обновляем последнего использованного врача для пациента
-                    patient.last_used_doctor = doctor_obj
-                    patient.save()
+                        logger.info(f"Выбран врач: {doctor_code} с {selected_doctor['free_count']} слотами")
 
-                    # Сохраняем ассоциацию врача с пациентом
-                    PatientDoctorAssociation.objects.update_or_create(
-                        patient=patient,
-                        defaults={'doctor': doctor_obj}
-                    )
+                        # Сохраняем эту ассоциацию врача для пациента
+                        try:
+                            doctor_obj, _ = Doctor.objects.get_or_create(
+                                doctor_code=doctor_code,
+                                defaults={'full_name': selected_doctor['doctor_name']}
+                            )
 
-                    logger.info(f"Автоматически выбран врач {doctor_code} для пациента {patient_id}")
-                else:
-                    # Используем первого доступного врача из отделения (последний запас)
-                    if by_doctor:
-                        first_available_doctor = next(iter(by_doctor.items()))
-                        doctor_code = first_available_doctor[0]
-                        doctor_name = first_available_doctor[1].get('doctor_name', '')
+                            # Обновляем последнего использованного врача для пациента
+                            patient.last_used_doctor = doctor_obj
+                            patient.save()
 
-                        doctor_obj, _ = Doctor.objects.get_or_create(
-                            doctor_code=doctor_code,
-                            defaults={'full_name': doctor_name}
-                        )
+                            # Сохраняем ассоциацию врача с пациентом
+                            PatientDoctorAssociation.objects.update_or_create(
+                                patient=patient,
+                                defaults={
+                                    'doctor': doctor_obj,
+                                    'last_booking_date': datetime.now(),
+                                    'booking_count': models.F('booking_count') + 1
+                                }
+                            )
 
-                        patient.last_used_doctor = doctor_obj
-                        patient.save()
+                            logger.info(f"Автоматически выбран врач {doctor_code} для пациента {patient_id}")
+                        except Exception as e:
+                            logger.error(f"Ошибка при сохранении врача: {e}")
+                    else:
+                        logger.warning(f"Не найдено врачей с доступными слотами на {requested_date}")
+                        # Используем первого доступного врача из отделения (последний запас)
+                        if by_doctor:
+                            first_available_doctor = next(iter(by_doctor.items()))
+                            doctor_code = first_available_doctor[0]
+                            doctor_name = first_available_doctor[1].get('doctor_name', '')
+                            department_id = first_available_doctor[1].get('department_id', department_id)
 
-                        # Сохраняем ассоциацию врача с пациентом
-                        PatientDoctorAssociation.objects.update_or_create(
-                            patient=patient,
-                            defaults={'doctor': doctor_obj}
-                        )
+                            try:
+                                doctor_obj, _ = Doctor.objects.get_or_create(
+                                    doctor_code=doctor_code,
+                                    defaults={'full_name': doctor_name}
+                                )
 
-                        logger.info(f"Выбран запасной вариант врача {doctor_code} для пациента {patient_id}")
+                                patient.last_used_doctor = doctor_obj
+                                patient.save()
+
+                                # Сохраняем ассоциацию врача с пациентом
+                                PatientDoctorAssociation.objects.update_or_create(
+                                    patient=patient,
+                                    defaults={'doctor': doctor_obj}
+                                )
+
+                                logger.info(f"Выбран запасной вариант врача {doctor_code} для пациента {patient_id}")
+                            except Exception as e:
+                                logger.error(f"Ошибка при сохранении запасного врача: {e}")
+
+        # Если все еще нет врача, но есть отделение, пробуем сделать прямой запрос
+        if not doctor_code and department_id:
+            logger.info(f"Врач все еще не определен, делаем прямой запрос по отделению {department_id}")
+            try:
+                # Выполняем прямой запрос по отделению
+                direct_schedule = get_patient_doctor_schedule(patient_id, days_horizon=1)
+
+                if direct_schedule.get('success') and direct_schedule.get('by_doctor'):
+                    available_doctors = []
+
+                    for doc_code, doctor_data in direct_schedule['by_doctor'].items():
+                        for schedule in doctor_data.get('schedules', []):
+                            if schedule.get('date_iso') == requested_date and schedule.get('has_free_slots', False):
+                                available_doctors.append({
+                                    'doctor_code': doc_code,
+                                    'doctor_name': doctor_data.get('doctor_name'),
+                                    'free_count': schedule.get('free_count', 1)
+                                })
+
+                    if available_doctors:
+                        selected_doctor = max(available_doctors, key=lambda x: x['free_count'])
+                        doctor_code = selected_doctor['doctor_code']
+                        logger.info(f"Найден врач через прямой запрос: {doctor_code}")
+                    else:
+                        logger.warning("Не найдено врачей с доступными слотами через прямой запрос")
+            except Exception as e:
+                logger.error(f"Ошибка при прямом запросе расписания: {e}")
 
         # Если все еще нет врача, возвращаем ошибку
         if not doctor_code:
@@ -143,18 +214,25 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
 
         # Определяем TOFILIAL
         target_branch_id = clinic_id or 1
+        logger.info(f"Целевой филиал (TOFILIAL): {target_branch_id}")
 
         # Проверяем, является ли это переносом существующей записи
         try:
             appointment = Appointment.objects.filter(patient=patient, is_active=True).order_by('-start_time').first()
             is_reschedule = bool(appointment)
             existing_schedid = appointment.appointment_id if appointment else None
+
+            if is_reschedule:
+                logger.info(f"Это перенос записи {existing_schedid}")
+            else:
+                logger.info("Это новая запись")
         except Exception as e:
             logger.error(f"Ошибка при проверке существующих записей: {e}")
             is_reschedule = False
             existing_schedid = None
 
         # Получаем доступные времена для указанной даты
+        logger.info(f"Запрашиваем доступные времена для {patient_id} на {requested_date} (врач: {doctor_code})")
         times_result = which_time_in_certain_day(patient_id, requested_date)
 
         # Обрабатываем результат, если это JsonResponse
@@ -182,6 +260,8 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
             for key in ['first_time', 'second_time', 'third_time']:
                 if key in times_data and times_data[key]:
                     available_times.append(times_data[key])
+
+        logger.info(f"Найдено {len(available_times)} доступных времен")
 
         # Если trigger_id == 3, просто возвращаем подтверждение о наличии слотов
         if trigger_id == 3:
@@ -275,8 +355,6 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
 
         # Если точное время доступно, выполняем резервирование
         # Получаем schedident напрямую через WEB_SCHEDULE
-
-        # Пытаемся получить schedident напрямую
         schedident = None
         try:
             from dotenv import load_dotenv
@@ -315,7 +393,8 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
             cert_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'certs', 'cert.pem')
             key_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'certs', 'key.pem')
 
-            logger.info(f"Полный XML-запрос SCHEDULE: {xml_request}")
+            logger.info(f"Полный XML-запрос web_schedule: {xml_request}")
+            logger.info(f"Получаем schedident для врача {doctor_code} на дату {requested_date}")
 
             response = requests.post(
                 url=infoclinica_api_url,
@@ -326,6 +405,7 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
 
             if response.status_code == 200:
                 root = ET.fromstring(response.text)
+                logger.debug(f"Тело ответа: {response.text[:500]}...")  # Логируем первые 500 символов ответа
                 namespace = {'ns': 'http://sdsys.ru/'}
 
                 # Получаем SCHEDIDENT из SCHEDINT
@@ -362,7 +442,8 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
                 'end_time': f"{end_hour:02d}:{end_min:02d}"
             })
 
-        # Вызываем функцию резервирования
+        # Вызываем функцию резервирования с обновленными данными
+        logger.info(f"Вызываем schedule_rec_reserve для пациента {patient_id} к врачу {doctor_code} на {datetime_obj}")
         reserve_result = schedule_rec_reserve(
             result_time=datetime_obj,
             doctor_id=doctor_code,

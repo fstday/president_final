@@ -114,6 +114,7 @@ def appointment_time_for_patient(patient_code, year_from_patient_for_returning=N
         </WEB_SCHEDULE_INFO>
         '''
 
+        logger.info(f"Полный XML-запрос web_schedule_info: {xml_request}")
         logger.info(
             f"Отправляем запрос с TOFILIAL={target_filial_id} для получения информации о записи {appointment_id}")
         response = requests.post(
@@ -126,6 +127,8 @@ def appointment_time_for_patient(patient_code, year_from_patient_for_returning=N
         if response.status_code == 200:
             try:
                 logger.info(f"Получен ответ: {response.text}")
+                logger.debug(f"Тело ответа: {response.text[:500]}...")  # Логируем первые 500 символов ответа
+
                 root = ET.fromstring(response.text)
                 namespace = {'ns': 'http://sdsys.ru/'}
 
