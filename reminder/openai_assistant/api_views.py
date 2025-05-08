@@ -1128,19 +1128,40 @@ def process_voicebot_request(request):
             return JsonResponse(response)
 
         # 3. Для запроса на запись/перенос
+        # Для запросов на запись без конкретного времени
+        # Для запросов на запись без конкретного времени
+        # Исправленная версия
         elif analysis_data.get("intent") == "booking":
-            # Для ближних дат (сегодня, завтра, послезавтра) - выбираем время и делаем запись
-            if not is_far_future:
+            if not is_far_future:  # сегодня, завтра, послезавтра
                 # Получаем доступные слоты
                 date_str = request_date.strftime("%Y-%m-%d")
                 available_slots_result = which_time_in_certain_day(patient_code, date_str)
 
+                # Преобразуем результат в словарь
                 if hasattr(available_slots_result, 'content'):
                     available_slots_dict = json.loads(available_slots_result.content.decode('utf-8'))
                 else:
                     available_slots_dict = available_slots_result
 
+                # Извлекаем времена
                 available_times = extract_available_times(available_slots_dict)
+
+                if available_times:
+                    # ВЫБИРАЕМ ПЕРВОЕ ДОСТУПНОЕ ВРЕМЯ
+                    selected_time = available_times[0]
+
+                    # ЗАПИСЫВАЕМ НЕМЕДЛЕННО
+                    datetime_str = f"{date_str} {selected_time}"
+                    booking_result = reserve_reception_for_patient(patient_code, datetime_str, 1)
+
+                    # Обрабатываем результат
+                    if hasattr(booking_result, 'content'):
+                        booking_result_dict = json.loads(booking_result.content.decode('utf-8'))
+                    else:
+                        booking_result_dict = booking_result
+
+                    if booking_result_dict.get("status") in ["success", "success_schedule", "success_change_reception"]:
+                        return JsonResponse(booking_result_dict)
 
                 if not available_times:
                     # Нет доступных времен

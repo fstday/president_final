@@ -763,10 +763,14 @@ class AssistantClient:
                 # Проверяем оба возможных имени параметра
 
                 patient_id = function_args.get("patient_id") or function_args.get("id")
-
                 date_from_patient = function_args.get("date_from_patient")
+                trigger_id = function_args.get("trigger_id", 1)  # По умолчанию 1
 
-                trigger_id = function_args.get("trigger_id", 1)
+                # Если нет конкретного времени, добавляем 10:30
+                if date_from_patient and ' ' not in date_from_patient:
+                    date_from_patient = f"{date_from_patient} 10:30"
+
+                result = reserve_reception_for_patient(patient_id, date_from_patient, trigger_id)
 
                 # Process date_from_patient
                 if date_from_patient:
