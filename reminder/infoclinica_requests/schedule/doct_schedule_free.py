@@ -523,7 +523,7 @@ def parse_doctor_schedule_response(xml_response):
     """
     Разбор XML-ответа для запроса DOCT_SCHEDULE_FREE
     Обрабатывает как ответы с одним врачом, так и ответы со всеми врачами отделения
-    Добавлена проверка ограничений по направлению
+    С улучшенной обработкой ограничений по возрасту и другим параметрам
 
     Параметры:
     xml_response (str): XML ответ от сервера
@@ -578,6 +578,7 @@ def parse_doctor_schedule_response(xml_response):
 
         schedules = []
         by_doctor = {}  # Группировка по врачам
+        doctors_with_restrictions = set()  # Набор ID врачей с ограничениями
 
         for sched in schedule_elements:
             schedule_data = {}
@@ -623,8 +624,10 @@ def parse_doctor_schedule_response(xml_response):
                     else:
                         schedule_data[field_name] = element.text
 
-            # Проверяем наличие ограничений (CHECKDATA)
+            # Проверяем наличие ограничений (CHECKDATA) - УЛУЧШЕННАЯ ОБРАБОТКА
             check_elements = sched.findall(".//ns:CHECKDATA", namespace)
+            has_blocking_restriction = False
+
             if check_elements:
                 check_data = []
                 for check in check_elements:
@@ -635,6 +638,15 @@ def parse_doctor_schedule_response(xml_response):
 
                     if check_code is not None:
                         check_info['check_code'] = check_code.text
+                        # Проверяем на блокирующие ограничения
+                        if check_code.text == "2":
+                            has_blocking_restriction = True
+                            if 'doctor_code' in schedule_data:
+                                doctors_with_restrictions.add(str(schedule_data['doctor_code']))
+                                logger.warning(
+                                    f"Врач {schedule_data.get('doctor_code')} ({schedule_data.get('doctor_name', '')}) "
+                                    f"имеет блокирующее ограничение: {check_label.text if check_label is not None else 'Неизвестное ограничение'}")
+
                     if check_label is not None:
                         check_info['check_label'] = check_label.text
                     if check_text is not None:
@@ -643,6 +655,7 @@ def parse_doctor_schedule_response(xml_response):
                     check_data.append(check_info)
 
                 schedule_data['check_data'] = check_data
+                schedule_data['has_blocking_restriction'] = has_blocking_restriction
 
             # Форматируем дополнительные поля для удобства
             if 'date' in schedule_data:
@@ -702,24 +715,37 @@ def parse_doctor_schedule_response(xml_response):
                         'department_name': schedule_data.get('department_name'),
                         'clinic_id': schedule_data.get('clinic_id'),
                         'clinic_name': schedule_data.get('clinic_name'),
-                        'schedules': []
+                        'schedules': [],
+                        'has_restrictions': str(doctor_code) in doctors_with_restrictions
                     }
                 by_doctor[doctor_code]['schedules'].append(schedule_data)
+
+                # Обновляем флаг ограничений на основе текущего расписания
+                if has_blocking_restriction:
+                    by_doctor[doctor_code]['has_restrictions'] = True
 
         # Сортируем результаты по дате и времени
         schedules.sort(key=lambda x: (x.get('date', ''), x.get('begin_hour', 0), x.get('begin_min', 0)))
 
         # Логирование для отладки
         if by_doctor:
-            logger.info(f"Найдено врачей: {len(by_doctor)}")
+            total_doctors = len(by_doctor)
+            restricted_doctors = len([d for d in by_doctor.values() if d.get('has_restrictions', False)])
+
+            logger.info(f"Найдено врачей: {total_doctors}, из них с ограничениями: {restricted_doctors}")
+
             for doctor_code, doctor_data in by_doctor.items():
+                restriction_status = "⚠️ ИМЕЕТ ОГРАНИЧЕНИЯ" if doctor_data.get('has_restrictions',
+                                                                               False) else "✅ Без ограничений"
                 logger.info(
-                    f"Врач: {doctor_data['doctor_name']} (ID: {doctor_code}), расписаний: {len(doctor_data['schedules'])}")
+                    f"Врач: {doctor_data['doctor_name']} (ID: {doctor_code}), {restriction_status}, "
+                    f"расписаний: {len(doctor_data['schedules'])}")
 
         return {
             'success': True,
             'schedules': schedules,
-            'by_doctor': by_doctor  # Включаем группировку по врачам
+            'by_doctor': by_doctor,  # Включаем группировку по врачам
+            'doctors_with_restrictions': list(doctors_with_restrictions)  # Список ID врачей с ограничениями
         }
 
     except Exception as e:
