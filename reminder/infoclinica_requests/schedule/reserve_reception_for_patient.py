@@ -233,6 +233,8 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
 
         # Получаем доступные времена для указанной даты
         logger.info(f"Запрашиваем доступные времена для {patient_id} на {requested_date} (врач: {doctor_code})")
+        logger.info(f"НАЧИНАЕМ ПРОВЕРКУ: requested_time='{requested_time}', trigger_id={trigger_id}")
+
         times_result = which_time_in_certain_day(patient_id, requested_date)
 
         # Обрабатываем результат, если это JsonResponse
@@ -260,6 +262,10 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
             for key in ['first_time', 'second_time', 'third_time']:
                 if key in times_data and times_data[key]:
                     available_times.append(times_data[key])
+
+        logger.info(f"ДОСТУПНЫЕ ВРЕМЕНА: {available_times}")
+        logger.info(
+            f"ПРОВЕРЯЕМ ТОЧНОЕ ВРЕМЯ: requested_time='{requested_time}' in available_times: {requested_time in available_times}")
 
         logger.info(f"Найдено {len(available_times)} доступных времен")
 
@@ -316,8 +322,11 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
 
         # Для trigger_id == 1, проверяем, доступно ли запрашиваемое время
         exact_time_available = requested_time in available_times
+        logger.info(f"EXACT_TIME_AVAILABLE: {exact_time_available}")
 
         if not exact_time_available:
+            logger.info(f"ТОЧНОЕ ВРЕМЯ НЕ ДОСТУПНО: {requested_time}")
+            logger.info(f"ВХОДИМ В БЛОК АЛЬТЕРНАТИВНЫХ ВРЕМЕН")
             # Точное время недоступно, нужно вернуть альтернативы
             from reminder.infoclinica_requests.utils import compare_and_suggest_times
 
@@ -354,6 +363,8 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
             return JsonResponse(result)
 
         # Если точное время доступно, выполняем резервирование
+        logger.info(f"НАЧИНАЕМ РЕЗЕРВИРОВАНИЕ: время {requested_time} доступно")
+
         # Получаем schedident напрямую через WEB_SCHEDULE
         schedident = None
         try:
@@ -419,9 +430,10 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
         except Exception as e:
             logger.error(f"Ошибка при получении schedident: {e}")
 
-        if not schedident:
-            logger.error(
-                f"Не удалось получить идентификатор расписания для врача {doctor_code} на дату {requested_date}")
+        if schedident:
+            logger.info(f"ПОЛУЧЕН SCHEDIDENT: {schedident}")
+        else:
+            logger.error(f"ОШИБКА: НЕ УДАЛОСЬ ПОЛУЧИТЬ SCHEDIDENT для врача {doctor_code} на дату {requested_date}")
             return JsonResponse({
                 "status": "error",
                 "message": "Не удалось получить идентификатор расписания"
@@ -443,7 +455,11 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
             })
 
         # Вызываем функцию резервирования с обновленными данными
-        logger.info(f"Вызываем schedule_rec_reserve для пациента {patient_id} к врачу {doctor_code} на {datetime_obj}")
+        logger.info(
+            f"ВЫЗОВ SCHEDULE_REC_RESERVE: patient_id={patient_id}, doctor_code={doctor_code}, datetime={datetime_obj}")
+        logger.info(
+            f"ПАРАМЕТРЫ РЕЗЕРВИРОВАНИЯ: schedident={schedident}, is_reschedule={is_reschedule}, schedid={existing_schedid}")
+
         reserve_result = schedule_rec_reserve(
             result_time=datetime_obj,
             doctor_id=doctor_code,
@@ -455,6 +471,8 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
             is_reschedule=is_reschedule,
             schedid=existing_schedid
         )
+
+        logger.info(f"РЕЗУЛЬТАТ SCHEDULE_REC_RESERVE: {reserve_result}")
 
         # После успешного бронирования сохраняем ассоциацию врача
         if reserve_result.get("status") in ["success_schedule", "success_change_reception"] or \
