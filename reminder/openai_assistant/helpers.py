@@ -283,3 +283,11 @@ def get_selected_time_slot(user_input, today_slots, tomorrow_slots):
         return target_date, target_slots[0]
 
     return None, None
+
+
+def normalize_time(time_str):
+    """Нормализует формат времени для корректного сравнения."""
+    if ':' in time_str:
+        hour, minute = map(int, time_str.split(':'))
+        return f"{hour:02d}:{minute:02d}"
+    return time_str

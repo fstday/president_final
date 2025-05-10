@@ -140,6 +140,11 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
 
     logger.info(f'DATE OBJECT {date_obj}')
 
+    # КРИТИЧЕСКИ ВАЖНО: Определение текущего дня и завтра для правильного выбора статуса
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+    appointment_date = None
+
     # КРИТИЧЕСКИ ВАЖНО: Правильная обработка даты/времени
     # Если date_obj - это строка, нормализуем её в datetime
     if isinstance(date_obj, str):
@@ -148,16 +153,21 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
             if ' ' in date_obj:
                 try:
                     date_obj = datetime.strptime(date_obj, '%Y-%m-%d %H:%M')
+                    appointment_date = date_obj.date()
                 except ValueError:
                     try:
                         date_obj = datetime.strptime(date_obj, '%Y-%m-%d %H:%M:%S')
+                        appointment_date = date_obj.date()
                     except ValueError:
                         return {'status': 'error', 'message': f'Неверный формат даты: {date_obj}'}
             else:
                 # Это только дата без времени
                 date_obj = datetime.strptime(date_obj, '%Y-%m-%d')
+                appointment_date = date_obj.date()
         except ValueError as e:
             return {'status': 'error', 'message': f'Ошибка преобразования даты: {str(e)}'}
+    elif isinstance(date_obj, datetime):
+        appointment_date = date_obj.date()
 
     # Если result_time - это строка, нормализуем её
     if isinstance(result_time, str):
@@ -309,7 +319,7 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                 if sp_result_code is None:
                     logger.error("SPRESULT не найден в ответе сервера")
                     return {
-                        'status': 'error',
+                        'status': 'error_med_element',
                         'message': 'SPRESULT не найден в ответе сервера'
                     }
 
@@ -319,6 +329,35 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                 sp_comment = sp_comment_text.text if sp_comment_text is not None else "Нет комментария"
 
                 logger.info(f"Код результата SPRESULT: {sp_result}, комментарий: {sp_comment}")
+
+                # Функции для форматирования даты
+                def format_date(date_obj):
+                    months_ru = {
+                        1: "Января", 2: "Февраля", 3: "Марта", 4: "Апреля", 5: "Мая", 6: "Июня",
+                        7: "Июля", 8: "Августа", 9: "Сентября", 10: "Октября", 11: "Ноября", 12: "Декабря"
+                    }
+                    return f"{date_obj.day} {months_ru[date_obj.month]}"
+
+                def format_date_kz(date_obj):
+                    months_kz = {
+                        1: "Қаңтар", 2: "Ақпан", 3: "Наурыз", 4: "Сәуір", 5: "Мамыр", 6: "Маусым",
+                        7: "Шілде", 8: "Тамыз", 9: "Қыркүйек", 10: "Қазан", 11: "Қараша", 12: "Желтоқсан"
+                    }
+                    return f"{date_obj.day} {months_kz[date_obj.month]}"
+
+                def get_weekday(date_obj):
+                    weekdays_ru = {
+                        0: "Понедельник", 1: "Вторник", 2: "Среда", 3: "Четверг",
+                        4: "Пятница", 5: "Суббота", 6: "Воскресенье"
+                    }
+                    return weekdays_ru[date_obj.weekday()]
+
+                def get_weekday_kz(date_obj):
+                    weekdays_kz = {
+                        0: "Дүйсенбі", 1: "Сейсенбі", 2: "Сәрсенбі", 3: "Бейсенбі",
+                        4: "Жұма", 5: "Сенбі", 6: "Жексенбі"
+                    }
+                    return weekdays_kz[date_obj.weekday()]
 
                 if sp_result == 1:
                     # Успешное резервирование
@@ -382,12 +421,37 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                     appointment_time_str = date_obj.strftime('%Y-%m-%d %H:%M:%S')
                     redis_reception_appointment(patient_id=patient_id, appointment_time=appointment_time_str)
 
-                    # Формируем ответ
+                    # ИЗМЕНЕНИЕ: Используем правильный статус в зависимости от даты
+                    status_code = "success_change_reception"
+                    if appointment_date == today:
+                        status_code = "success_change_reception_today"
+                    elif appointment_date == tomorrow:
+                        status_code = "success_change_reception_tomorrow"
+
+                    # Добавляем информацию о дне для сегодня/завтра
+                    day_info = {}
+                    if appointment_date == today:
+                        day_info = {
+                            "day": "сегодня",
+                            "day_kz": "бүгін"
+                        }
+                    elif appointment_date == tomorrow:
+                        day_info = {
+                            "day": "завтра",
+                            "day_kz": "ертең"
+                        }
+
+                    # Формируем ответ с правильным статусом и полной информацией
                     return {
-                        'status': 'success_schedule',
+                        'status': status_code,
                         'message': f'Запись произведена успешно на {appointment_time_str}',
-                        'time': appointment_time_str,
-                        'specialist_name': doctor.full_name if doctor else "Специалист"
+                        'time': result_time.strftime('%H:%M') if isinstance(result_time, datetime) else result_time,
+                        'specialist_name': doctor.full_name if doctor else "Специалист",
+                        'date': format_date(appointment_date),
+                        'date_kz': format_date_kz(appointment_date),
+                        'weekday': get_weekday(appointment_date),
+                        'weekday_kz': get_weekday_kz(appointment_date),
+                        **day_info
                     }
 
                 elif sp_result == 0:
@@ -407,8 +471,6 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                         logger.info(
                             f"Запрашиваем актуальные данные о свободных временах для {doctor_id} на {current_date}")
                         fresh_times_result = which_time_in_certain_day(patient_id, current_date)
-
-                        # Обрабатываем результат
                         if hasattr(fresh_times_result, 'content'):
                             fresh_times_data = json.loads(fresh_times_result.content.decode('utf-8'))
                         else:
@@ -446,47 +508,140 @@ def schedule_rec_reserve(result_time, doctor_id, date_part, patient_id, date_obj
                     # Возвращаем все доступные времена
                     available_times = compare_and_suggest_times(free_intervals, requested_time_obj, date_part)
 
-                    answer = {
-                        'status': 'suggest_times',
-                        'suggested_times': available_times,
-                        'message': f'Время приема {result_time} занято. Возвращаю все свободные времена для записи',
-                        'action': 'reserve',
-                        'specialist_name': doctor.full_name if doctor else "Специалист"
-                    }
+                    # Определяем статус в зависимости от количества доступных времен и даты
+                    if len(available_times) == 0:
+                        status = "error_change_reception_bad_date"
+                        return {
+                            'status': status,
+                            'data': f'Время приема {result_time} занято. Нет доступных альтернатив.'
+                        }
+                    elif len(available_times) == 1:
+                        status = "change_only_first_time"
+                        if appointment_date == today:
+                            status = "change_only_first_time_today"
+                        elif appointment_date == tomorrow:
+                            status = "change_only_first_time_tomorrow"
 
-                    logger.info(f"Возвращаю из schedule_rec_reserve: {answer}")
-                    return answer
+                        # Добавляем информацию о дне для сегодня/завтра
+                        day_info = {}
+                        if appointment_date == today:
+                            day_info = {
+                                "day": "сегодня",
+                                "day_kz": "бүгін"
+                            }
+                        elif appointment_date == tomorrow:
+                            day_info = {
+                                "day": "завтра",
+                                "day_kz": "ертең"
+                            }
+
+                        return {
+                            'status': status,
+                            'date': format_date(appointment_date),
+                            'date_kz': format_date_kz(appointment_date),
+                            'weekday': get_weekday(appointment_date),
+                            'weekday_kz': get_weekday_kz(appointment_date),
+                            'specialist_name': doctor.full_name if doctor else "Специалист",
+                            'first_time': available_times[0],
+                            'message': f'Время приема {result_time} занято. Предлагаю альтернативное время.',
+                            **day_info
+                        }
+                    elif len(available_times) == 2:
+                        status = "change_only_two_time"
+                        if appointment_date == today:
+                            status = "change_only_two_time_today"
+                        elif appointment_date == tomorrow:
+                            status = "change_only_two_time_tomorrow"
+
+                        # Добавляем информацию о дне для сегодня/завтра
+                        day_info = {}
+                        if appointment_date == today:
+                            day_info = {
+                                "day": "сегодня",
+                                "day_kz": "бүгін"
+                            }
+                        elif appointment_date == tomorrow:
+                            day_info = {
+                                "day": "завтра",
+                                "day_kz": "ертең"
+                            }
+
+                        return {
+                            'status': status,
+                            'date': format_date(appointment_date),
+                            'date_kz': format_date_kz(appointment_date),
+                            'weekday': get_weekday(appointment_date),
+                            'weekday_kz': get_weekday_kz(appointment_date),
+                            'specialist_name': doctor.full_name if doctor else "Специалист",
+                            'first_time': available_times[0],
+                            'second_time': available_times[1],
+                            'message': f'Время приема {result_time} занято. Предлагаю альтернативные времена.',
+                            **day_info
+                        }
+                    else:
+                        status = "error_change_reception"
+                        if appointment_date == today:
+                            status = "error_change_reception_today"
+                        elif appointment_date == tomorrow:
+                            status = "error_change_reception_tomorrow"
+
+                        # Добавляем информацию о дне для сегодня/завтра
+                        day_info = {}
+                        if appointment_date == today:
+                            day_info = {
+                                "day": "сегодня",
+                                "day_kz": "бүгін"
+                            }
+                        elif appointment_date == tomorrow:
+                            day_info = {
+                                "day": "завтра",
+                                "day_kz": "ертең"
+                            }
+
+                        return {
+                            'status': status,
+                            'date': format_date(appointment_date),
+                            'date_kz': format_date_kz(appointment_date),
+                            'weekday': get_weekday(appointment_date),
+                            'weekday_kz': get_weekday_kz(appointment_date),
+                            'specialist_name': doctor.full_name if doctor else "Специалист",
+                            'first_time': available_times[0],
+                            'second_time': available_times[1],
+                            'third_time': available_times[2],
+                            'message': f'Время приема {result_time} занято. Возвращаю альтернативные времена.',
+                            **day_info
+                        }
                 else:
                     # Другие коды ошибок
                     logger.warning(f'Получен код ошибки: {sp_result}, комментарий: {sp_comment}')
                     return {
-                        'status': 'error',
+                        'status': 'error_med_element',
                         'message': f'Ошибка при резервировании: {sp_comment}'
                     }
 
             except ET.ParseError as e:
                 logger.error(f'Ошибка при парсинге XML: {e}')
                 return {
-                    'status': 'error',
+                    'status': 'error_med_element',
                     'message': f'Ошибка при парсинге XML: {e}'
                 }
         else:
             # Ошибка HTTP
             logger.error(f'HTTP ошибка: {response.status_code}, ответ: {response.text}')
             return {
-                'status': 'error',
+                'status': 'error_med_element',
                 'message': f'HTTP ошибка: {response.status_code}'
             }
 
     except requests.exceptions.RequestException as e:
         logger.error(f'Ошибка при выполнении запроса: {e}')
         return {
-            'status': 'error',
+            'status': 'error_med_element',
             'message': f'Ошибка при выполнении запроса: {e}'
         }
 
     # Если код доходит до сюда, значит, произошла ошибка
     return {
-        'status': 'error',
+        'status': 'error_med_element',
         'message': 'Не удалось завершить операцию резервирования.'
     }

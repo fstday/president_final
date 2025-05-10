@@ -1052,6 +1052,9 @@ class AssistantClient:
                         "weekday_kz": WEEKDAYS_KZ[weekday_idx]
                     }
 
+                # Исправление в методе _format_for_acs в классе AssistantClient
+                # Найдите этот блок кода в функции _format_for_acs:
+
                 # Success case
                 if result.get("status") in ["success", "success_schedule", "success_change_reception"] or \
                         result.get("status", "").startswith("success_change_reception"):
@@ -1063,6 +1066,7 @@ class AssistantClient:
                     if time.count(":") == 2:  # Format: "HH:MM:SS"
                         time = ":".join(time.split(":")[:2])
 
+                    # Определение правильного статуса в зависимости от даты
                     status = "success_change_reception"
                     if relation == "today":
                         status = "success_change_reception_today"
@@ -1070,7 +1074,7 @@ class AssistantClient:
                         status = "success_change_reception_tomorrow"
 
                     response = {
-                        "status": status,
+                        "status": status,  # Использовать правильный статус из списка допустимых
                         **date_info,
                         "specialist_name": result.get("specialist_name", "Специалист"),
                         "time": time
@@ -1383,7 +1387,7 @@ class AssistantClient:
             JsonResponse: A properly formatted response
         """
         from reminder.openai_assistant.api_views import process_which_time_response, process_reserve_reception_response, \
-            process_delete_reception_response, process_appointment_time_response
+            process_delete_reception_response
 
         try:
             user_input = user_input.lower()
@@ -1391,14 +1395,6 @@ class AssistantClient:
             # Check for appointment info request (highest priority for clarity)
             if any(word in user_input for word in ["когда", "какая", "время", "записан", "во сколько", "не помню"]):
                 result = appointment_time_for_patient(patient_code)
-
-                if hasattr(result, 'content'):
-                    result_dict = json.loads(result.content.decode('utf-8'))
-                    processed_result = process_appointment_time_response(result_dict)
-                    return JsonResponse(processed_result)
-                else:
-                    processed_result = process_appointment_time_response(result)
-                    return JsonResponse(processed_result)
 
             # Check for cancel request
             elif any(word in user_input for word in ["отмен", "удал", "не приду", "убер"]):

@@ -264,22 +264,25 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
                     available_times.append(times_data[key])
 
         logger.info(f"ДОСТУПНЫЕ ВРЕМЕНА: {available_times}")
+
+        # ДОБАВЛЕННЫЙ КОД: Нормализация форматов времени для корректного сравнения
+        def normalize_time(time_str):
+            """Нормализует формат времени для корректного сравнения."""
+            if isinstance(time_str, str) and ':' in time_str:
+                hour, minute = map(int, time_str.split(':'))
+                return f"{hour:02d}:{minute:02d}"
+            return time_str
+
+        normalized_requested_time = normalize_time(requested_time)
+        normalized_available_times = [normalize_time(t) for t in available_times]
+
+        # Обновленная проверка доступности времени с нормализованными форматами
+        exact_time_available = normalized_requested_time in normalized_available_times
         logger.info(
-            f"ПРОВЕРЯЕМ ТОЧНОЕ ВРЕМЯ: requested_time='{requested_time}' in available_times: {requested_time in available_times}")
-
+            f"ПРОВЕРЯЕМ ТОЧНОЕ ВРЕМЯ: requested_time='{requested_time}' in available_times: {exact_time_available}")
+        logger.info(f"Нормализованное время пользователя: {normalized_requested_time}")
         logger.info(f"Найдено {len(available_times)} доступных времен")
-
-        # Если trigger_id == 3, просто возвращаем подтверждение о наличии слотов
-        if trigger_id == 3:
-            return JsonResponse({
-                "status": "success_check_availability",
-                "message": "Слоты доступны",
-                "patient_id": patient_id,
-                "date": requested_date,
-                "time": requested_time,
-                "doctor_code": doctor_code,
-                "available_times": available_times
-            })
+        logger.info(f"EXACT_TIME_AVAILABLE: {exact_time_available}")
 
         # Обрабатываем trigger_id == 2 (поиск альтернативного времени)
         if trigger_id == 2:
@@ -321,9 +324,6 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
             return JsonResponse(result)
 
         # Для trigger_id == 1, проверяем, доступно ли запрашиваемое время
-        exact_time_available = requested_time in available_times
-        logger.info(f"EXACT_TIME_AVAILABLE: {exact_time_available}")
-
         if not exact_time_available:
             logger.info(f"ТОЧНОЕ ВРЕМЯ НЕ ДОСТУПНО: {requested_time}")
             logger.info(f"ВХОДИМ В БЛОК АЛЬТЕРНАТИВНЫХ ВРЕМЕН")

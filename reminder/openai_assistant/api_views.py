@@ -393,16 +393,16 @@ def process_reserve_reception_response(response_data, date_obj, requested_time, 
                 if time.count(":") == 2:
                     time = ":".join(time.split(":")[:2])
 
-            # Determine success status
+            # Определение правильного статуса в зависимости от даты
             success_status = "success_change_reception"
             if relation == "today":
                 success_status = "success_change_reception_today"
             elif relation == "tomorrow":
                 success_status = "success_change_reception_tomorrow"
 
-            # Build response
+            # Сборка ответа в соответствии с документацией
             response = {
-                "status": success_status,
+                "status": success_status,  # Используем правильный статус из списка valid_statuses
                 "date": date_info["date"],
                 "date_kz": date_info["date_kz"],
                 "specialist_name": specialist_name,
@@ -536,7 +536,7 @@ def process_reserve_reception_response(response_data, date_obj, requested_time, 
                     else:
                         booking_result_dict = booking_result
 
-                    # If booking successful, return success response
+                    # If booking successful, return success response with correct status
                     if booking_result_dict.get("status") in ["success", "success_schedule",
                                                              "success_change_reception"] or \
                             booking_result_dict.get("status", "").startswith("success_change_reception"):
@@ -965,7 +965,7 @@ def process_voicebot_request(request):
         # Add user message
         assistant_client.add_message_to_thread(thread.thread_id, user_input)
 
-        # Create request analysis instructions for the assistant
+        # УЛУЧШЕННЫЕ инструкции для анализа запроса пользователя
         request_analysis_instructions = """
         # АНАЛИЗ ЗАПРОСА ПОЛЬЗОВАТЕЛЯ
 
@@ -991,9 +991,24 @@ def process_voicebot_request(request):
            - specific_time (конкретное время)
            - any_time (любое время)
 
-        4. Если указано конкретное время, укажи его в формате HH:MM
+        ## КРИТИЧЕСКИ ВАЖНО: ОБРАБОТКА ТОЧНЫХ ДАТ И ВРЕМЕННЫХ ИНТЕРВАЛОВ
 
-        5. Если указана конкретная дата, укажи её в формате YYYY-MM-DD
+        1. Если в запросе указана фраза "через X дней":
+           - ВСЕГДА устанавливай date_type = "specific_date"
+           - ОБЯЗАТЕЛЬНО вычисли и укажи точную дату в формате YYYY-MM-DD
+           - Например, при запросе "через 4 дня" рассчитай дату путем прибавления 4 дней к текущей дате (2025-05-10 + 4 дня = 2025-05-14)
+
+        2. Для выражений о будущем:
+           - "послезавтра" = текущая дата + 2 дня (date_type = "day_after_tomorrow")
+           - "после после завтра" = текущая дата + 3 дня (date_type = "specific_date" с конкретной датой)
+           - "через неделю" = текущая дата + 7 дней (date_type = "specific_date" с конкретной датой)
+           - "через N дней" = текущая дата + N дней (date_type = "specific_date" с конкретной датой)
+
+        3. Если указана конкретная дата (например, "15 мая"), переведи её в формат YYYY-MM-DD с правильным годом
+
+        4. ВАЖНО: Если дата отстоит более чем на 2 дня от текущей, используй date_type = "specific_date"
+
+        5. Если указано конкретное время, укажи его в формате HH:MM
 
         Верни результат в формате JSON без дополнительных комментариев:
         ```json
@@ -1003,6 +1018,52 @@ def process_voicebot_request(request):
           "specific_date": "YYYY-MM-DD или null",
           "time_preference": "morning|afternoon|evening|specific_time|any_time",
           "specific_time": "HH:MM или null"
+        }
+        ```
+
+        ПРИМЕРЫ ПРАВИЛЬНОГО АНАЛИЗА:
+
+        1. "Запиши на сегодня в 15:00"
+        ```json
+        {
+          "intent": "booking",
+          "date_type": "today",
+          "specific_date": null,
+          "time_preference": "specific_time",
+          "specific_time": "15:00"
+        }
+        ```
+
+        2. "Запиши через 4 дня"
+        ```json
+        {
+          "intent": "booking",
+          "date_type": "specific_date",
+          "specific_date": "2025-05-14",
+          "time_preference": "any_time",
+          "specific_time": null
+        }
+        ```
+
+        3. "Запиши после послезавтра утром"
+        ```json
+        {
+          "intent": "booking",
+          "date_type": "specific_date", 
+          "specific_date": "2025-05-13",
+          "time_preference": "morning",
+          "specific_time": null
+        }
+        ```
+
+        4. "Запиши через неделю вечером"
+        ```json
+        {
+          "intent": "booking",
+          "date_type": "specific_date",
+          "specific_date": "2025-05-17",
+          "time_preference": "evening",
+          "specific_time": null
         }
         ```
         """
@@ -1051,19 +1112,50 @@ def process_voicebot_request(request):
                 "specific_time": None
             }
 
-        # Определяем дату для запроса на основе анализа
-        request_date = get_date_from_analysis(analysis_data)
-
-        # Проверяем, дальняя ли это дата (более 2 дней)
-        is_far_future = analysis_data.get("date_type") in ["far_future", "specific_date"]
-        if analysis_data.get("specific_date"):
+        # Упрощенная обработка даты, полагаясь на данные от ассистента
+        if analysis_data.get("date_type") == "specific_date" and analysis_data.get("specific_date"):
+            # Используем конкретную дату из анализа
             try:
-                date_obj = datetime.strptime(analysis_data.get("specific_date"), "%Y-%m-%d")
-                today = datetime.now()
-                days_difference = (date_obj - today).days
+                request_date = datetime.strptime(analysis_data.get("specific_date"), "%Y-%m-%d")
+
+                # Определяем, является ли это дальней датой (более 2 дней)
+                days_difference = (request_date.date() - datetime.now().date()).days
                 is_far_future = days_difference > 2
-            except:
+                logger.info(
+                    f"Определена дата из specific_date: {analysis_data.get('specific_date')}, разница {days_difference} дней, дальняя дата: {is_far_future}")
+            except ValueError:
+                logger.error(f"Ошибка преобразования даты {analysis_data.get('specific_date')}")
+                request_date = datetime.now()
                 is_far_future = False
+        else:
+            # Используем стандартную логику для других типов дат
+            if analysis_data.get("date_type") == "tomorrow":
+                request_date = datetime.now() + timedelta(days=1)
+                is_far_future = False
+            elif analysis_data.get("date_type") == "day_after_tomorrow":
+                request_date = datetime.now() + timedelta(days=2)
+                is_far_future = False
+            elif analysis_data.get("date_type") == "near_future":
+                # Для near_future без конкретной даты берем +3 дня по умолчанию
+                request_date = datetime.now() + timedelta(days=3)
+                is_far_future = True
+            elif analysis_data.get("date_type") == "far_future":
+                # Для far_future без конкретной даты берем +7 дней по умолчанию
+                request_date = datetime.now() + timedelta(days=7)
+                is_far_future = True
+            else:
+                # По умолчанию сегодня
+                request_date = datetime.now()
+                is_far_future = False
+
+        # Дополнительно проверяем текст на наличие "через X дней"
+        days_pattern = re.search(r'через\s+(\d+)\s+(?:дн[еяй]|день|дня)', user_input.lower())
+        if days_pattern:
+            days_count = int(days_pattern.group(1))
+            request_date = datetime.now() + timedelta(days=days_count)
+            is_far_future = days_count > 2
+            logger.info(
+                f"Найдена фраза 'через {days_count} дней', разница {days_count} дней, дальняя дата: {is_far_future}")
 
         # Для каждого типа запроса выполняем соответствующие действия
 
@@ -1084,13 +1176,7 @@ def process_voicebot_request(request):
 
         # 2. Для запроса информации о доступных временах
         elif analysis_data.get("intent") == "info":
-            date_str = today
-            if analysis_data.get("date_type") == "tomorrow":
-                date_str = tomorrow
-            elif analysis_data.get("date_type") == "day_after_tomorrow":
-                date_str = day_after_tomorrow
-            elif analysis_data.get("specific_date"):
-                date_str = analysis_data.get("specific_date")
+            date_str = request_date.strftime("%Y-%m-%d")
 
             result = which_time_in_certain_day(patient_code, date_str)
             if hasattr(result, 'content'):
@@ -1098,12 +1184,7 @@ def process_voicebot_request(request):
             else:
                 result_dict = result
 
-            try:
-                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-            except:
-                date_obj = datetime.now()
-
-            response = process_which_time_response(result_dict, date_obj, patient_code)
+            response = process_which_time_response(result_dict, request_date, patient_code, user_input)
 
             # Update context with shown times
             times = []
@@ -1113,9 +1194,10 @@ def process_voicebot_request(request):
 
             # Determine day type
             day_type = None
-            if "today" in response.get("status", ""):
+            days_diff = (request_date.date() - datetime.now().date()).days
+            if days_diff == 0:
                 day_type = "today"
-            elif "tomorrow" in response.get("status", ""):
+            elif days_diff == 1:
                 day_type = "tomorrow"
 
             context_manager.update_context(patient_code, {
@@ -1129,137 +1211,13 @@ def process_voicebot_request(request):
 
         # 3. Для запроса на запись/перенос
         # Для запросов на запись без конкретного времени
-        # Для запросов на запись без конкретного времени
-        # Исправленная версия
         elif analysis_data.get("intent") == "booking":
-            if not is_far_future:  # сегодня, завтра, послезавтра
-                # Получаем доступные слоты
+            # КЛЮЧЕВАЯ ПРОВЕРКА - если это дальняя дата, показываем только доступные времена
+            if is_far_future:  # На дату более чем через 2 дня
+                # Только показываем доступные времена без автоматического бронирования
                 date_str = request_date.strftime("%Y-%m-%d")
-                available_slots_result = which_time_in_certain_day(patient_code, date_str)
+                logger.info(f"Запрос доступных времен для дальней даты: {date_str}")
 
-                # Преобразуем результат в словарь
-                if hasattr(available_slots_result, 'content'):
-                    available_slots_dict = json.loads(available_slots_result.content.decode('utf-8'))
-                else:
-                    available_slots_dict = available_slots_result
-
-                # Извлекаем времена
-                available_times = extract_available_times(available_slots_dict)
-
-                if available_times:
-                    # ВЫБИРАЕМ ПЕРВОЕ ДОСТУПНОЕ ВРЕМЯ
-                    selected_time = available_times[0]
-
-                    # ЗАПИСЫВАЕМ НЕМЕДЛЕННО
-                    datetime_str = f"{date_str} {selected_time}"
-                    booking_result = reserve_reception_for_patient(patient_code, datetime_str, 1)
-
-                    # Обрабатываем результат
-                    if hasattr(booking_result, 'content'):
-                        booking_result_dict = json.loads(booking_result.content.decode('utf-8'))
-                    else:
-                        booking_result_dict = booking_result
-
-                    if booking_result_dict.get("status") in ["success", "success_schedule", "success_change_reception"]:
-                        return JsonResponse(booking_result_dict)
-
-                if not available_times:
-                    # Нет доступных времен
-                    return JsonResponse({
-                        "status": "error_empty_windows",
-                        "message": f"На {date_str} нет доступных времен для записи"
-                    })
-
-                # Используем ассистента для выбора подходящего времени из доступных
-                time_selection_prompt = f"""
-                На основе запроса пользователя: "{user_input}"
-                выбери наиболее подходящее время из доступных: {available_times}
-
-                ВАЖНЫЙ КОНТЕКСТ:
-                {f"В предыдущем ответе пользователю были показаны: {previous_times}" if previous_times else ""}
-                {f"Предыдущий контекст содержал дату: {previous_date}" if previous_date else ""}
-                {f"Предыдущий статус ответа: {previous_status}" if previous_status else ""}
-
-                Определи из запроса пользователя, какое время суток он предпочитает:
-                - Утро (9:00-11:59)
-                - День (12:00-15:59)
-                - Вечер (16:00-20:30)
-
-                Если в запросе указано конкретное время, выбери ближайшее к нему из доступных.
-                Если в запросе указано время суток (утро/день/вечер), выбери подходящее из этого периода.
-                Если нет прямого указания на время, выбери самое раннее доступное.
-
-                Верни ТОЛЬКО выбранное время в формате ЧЧ:ММ без каких-либо пояснений.
-                """
-
-                time_selection_thread = assistant_client.get_or_create_thread(f"time_selection_{patient_code}", patient)
-                assistant_client.add_message_to_thread(time_selection_thread.thread_id, time_selection_prompt)
-
-                time_selection_run = assistant_client.run_assistant(
-                    time_selection_thread,
-                    patient,
-                    instructions="Выбери наиболее подходящее время из списка доступных. Верни только время в формате ЧЧ:ММ."
-                )
-
-                # Получаем выбранное время от ассистента
-                selected_time = None
-                try:
-                    selection_result = assistant_client.wait_for_run_completion(
-                        time_selection_thread.thread_id,
-                        time_selection_run.run_id,
-                        timeout=5
-                    )
-
-                    selection_messages = assistant_client.get_messages(time_selection_thread.thread_id, limit=1)
-                    if selection_messages:
-                        time_text = extract_text_content(selection_messages[0])
-                        time_match = re.search(r'(\d{1,2}):(\d{2})', time_text)
-                        if time_match:
-                            selected_time = f"{int(time_match.group(1)):02d}:{time_match.group(2)}"
-                except Exception as selection_error:
-                    logger.error(f"Ошибка при выборе времени: {selection_error}")
-
-                # Если не удалось получить время от ассистента, используем первое доступное
-                if not selected_time and available_times:
-                    selected_time = available_times[0]
-
-                if selected_time:
-                    # Делаем запись на выбранное время
-                    datetime_str = f"{date_str} {selected_time}"
-                    booking_result = reserve_reception_for_patient(patient_code, datetime_str, 1)
-
-                    if hasattr(booking_result, 'content'):
-                        booking_result_dict = json.loads(booking_result.content.decode('utf-8'))
-                    else:
-                        booking_result_dict = booking_result
-
-                    processed_result = process_reserve_reception_response(
-                        booking_result_dict,
-                        request_date,
-                        selected_time,
-                        user_input
-                    )
-
-                    # Update context with booking info
-                    day_type = None
-                    if "today" in processed_result.get("status", ""):
-                        day_type = "today"
-                    elif "tomorrow" in processed_result.get("status", ""):
-                        day_type = "tomorrow"
-
-                    context_manager.update_context(patient_code, {
-                        'status': processed_result.get('status'),
-                        'date': date_str,
-                        'day': day_type,
-                        'booked_time': selected_time,
-                        'times': []  # Clear times after booking
-                    })
-
-                    return JsonResponse(processed_result)
-
-            # Для дальних дат (более 2 дней) - только показываем доступные времена
-            else:
-                date_str = request_date.strftime("%Y-%m-%d")
                 result = which_time_in_certain_day(patient_code, date_str)
 
                 if hasattr(result, 'content'):
@@ -1277,9 +1235,10 @@ def process_voicebot_request(request):
 
                 # Determine day type
                 day_type = None
-                if date_str == today:
+                days_diff = (request_date.date() - datetime.now().date()).days
+                if days_diff == 0:
                     day_type = "today"
-                elif date_str == tomorrow:
+                elif days_diff == 1:
                     day_type = "tomorrow"
 
                 context_manager.update_context(patient_code, {
@@ -1290,6 +1249,149 @@ def process_voicebot_request(request):
                 })
 
                 return JsonResponse(response)
+
+            else:  # сегодня, завтра, послезавтра - автоматически бронируем
+                # Получаем доступные слоты
+                date_str = request_date.strftime("%Y-%m-%d")
+                available_slots_result = which_time_in_certain_day(patient_code, date_str)
+
+                # Преобразуем результат в словарь
+                if hasattr(available_slots_result, 'content'):
+                    available_slots_dict = json.loads(available_slots_result.content.decode('utf-8'))
+                else:
+                    available_slots_dict = available_slots_result
+
+                # Извлекаем времена
+                available_times = extract_available_times(available_slots_dict)
+
+                if available_times:
+                    # КЛЮЧЕВАЯ МОДИФИКАЦИЯ: Используем OpenAI GPT для выбора времени
+                    try:
+                        from openai import OpenAI
+                        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+                        # Формируем запрос для ассистента
+                        time_selection_prompt = f"""
+                        На основе запроса пользователя: "{user_input}"
+                        выбери наиболее подходящее время из доступных: {available_times}
+
+                        ВАЖНЫЙ КОНТЕКСТ:
+                        {f"В предыдущем ответе пользователю были показаны: {previous_times}" if previous_times else ""}
+                        {f"Предыдущий контекст содержал дату: {previous_date}" if previous_date else ""}
+                        {f"Предыдущий статус ответа: {previous_status}" if previous_status else ""}
+
+                        Определи из запроса пользователя, какое время суток он предпочитает:
+                        - Утро (9:00-11:59)
+                        - День (12:00-15:59)
+                        - Вечер (16:00-20:30)
+
+                        Если в запросе указано конкретное время, выбери ближайшее к нему из доступных.
+                        Если в запросе указано время суток (утро/день/вечер), выбери подходящее из этого периода.
+                        Если нет прямого указания на время, выбери самое раннее доступное.
+
+                        Верни ТОЛЬКО выбранное время в формате ЧЧ:ММ без каких-либо пояснений.
+                        """
+
+                        # Отправляем запрос к ассистенту
+                        response = client.chat.completions.create(
+                            model="gpt-4",
+                            messages=[
+                                {"role": "system",
+                                 "content": "You are a helpful assistant that selects the most appropriate time slot based on user's preferences."},
+                                {"role": "user", "content": time_selection_prompt}
+                            ],
+                            max_tokens=20,
+                            temperature=0.2
+                        )
+
+                        # Извлекаем ответ ассистента
+                        time_response = response.choices[0].message.content.strip()
+
+                        # Проверяем, соответствует ли ответ формату времени
+                        time_match = re.search(r'(\d{1,2}):(\d{2})', time_response)
+                        if time_match:
+                            # Форматируем время в правильный формат
+                            hour = int(time_match.group(1))
+                            minute = int(time_match.group(2))
+                            selected_time = f"{hour:02d}:{minute:02d}"
+
+                            # Проверяем, есть ли выбранное время в списке доступных
+                            if selected_time in available_times:
+                                logger.info(f"Ассистент выбрал время: {selected_time}")
+                            else:
+                                # Ищем ближайшее время из доступных
+                                selected_datetime = datetime.strptime(selected_time, "%H:%M")
+                                closest_time = min(available_times, key=lambda x:
+                                abs((datetime.strptime(x, "%H:%M") - selected_datetime).total_seconds()))
+                                selected_time = closest_time
+                                logger.info(f"Ассистент выбрал ближайшее доступное время: {selected_time}")
+                        else:
+                            # Если ассистент не вернул корректное время, используем первое доступное
+                            selected_time = available_times[0]
+                            logger.info(f"Используем первое доступное время: {selected_time}")
+
+                        # Записываем на выбранное время
+                        datetime_str = f"{date_str} {selected_time}"
+                        booking_result = reserve_reception_for_patient(patient_code, datetime_str, 1)
+
+                        # Обрабатываем результат
+                        if hasattr(booking_result, 'content'):
+                            booking_result_dict = json.loads(booking_result.content.decode('utf-8'))
+                        else:
+                            booking_result_dict = booking_result
+
+                        processed_result = process_reserve_reception_response(
+                            booking_result_dict,
+                            request_date,
+                            selected_time,
+                            user_input
+                        )
+
+                        # Обновляем контекст
+                        day_type = None
+                        if "today" in processed_result.get("status", ""):
+                            day_type = "today"
+                        elif "tomorrow" in processed_result.get("status", ""):
+                            day_type = "tomorrow"
+
+                        context_manager.update_context(patient_code, {
+                            'status': processed_result.get('status'),
+                            'date': date_str,
+                            'day': day_type,
+                            'booked_time': selected_time,
+                            'times': []  # Очищаем предыдущие времена
+                        })
+
+                        return JsonResponse(processed_result)
+
+                    except Exception as e:
+                        logger.error(f"Ошибка при использовании ассистента для выбора времени: {e}")
+                        # Если произошла ошибка, используем стандартный подход - первое доступное время
+                        selected_time = available_times[0]
+
+                        datetime_str = f"{date_str} {selected_time}"
+                        booking_result = reserve_reception_for_patient(patient_code, datetime_str, 1)
+
+                        if hasattr(booking_result, 'content'):
+                            booking_result_dict = json.loads(booking_result.content.decode('utf-8'))
+                        else:
+                            booking_result_dict = booking_result
+
+                        processed_result = process_reserve_reception_response(
+                            booking_result_dict,
+                            request_date,
+                            selected_time,
+                            user_input
+                        )
+
+                        return JsonResponse(processed_result)
+
+                if not available_times:
+                    # Нет доступных времен
+                    return JsonResponse({
+                        "status": "error_empty_windows",
+                        "message": f"На {date_str} нет доступных времен для записи"
+                    })
 
         # Create context-enhanced instructions with previous interaction data
         context_instructions = """
@@ -1353,23 +1455,30 @@ def process_voicebot_request(request):
         date_booking_instructions = """
         ## ПРАВИЛА БРОНИРОВАНИЯ В ЗАВИСИМОСТИ ОТ ДАТЫ
 
-        ### 1. ДЛЯ БЛИЖНИХ ДАТ (СЕГОДНЯ, ЗАВТРА, ПОСЛЕЗАВТРА):
+        ### КРИТИЧЕСКИ ВАЖНО: ОБРАБОТКА ДАТ
+        1. ВСЕГДА проверяй, есть ли в запросе указание на конкретную дату
+        2. Специальные фразы "через X дней" ВСЕГДА обрабатывай как конкретные даты
+        3. ВСЕГДА вычисляй конкретную дату, прибавляя нужное количество дней к текущей
 
-        Для записи на сегодня, завтра или послезавтра:
-
+        ### ДЛЯ БЛИЖНИХ ДАТ (СЕГОДНЯ, ЗАВТРА, ПОСЛЕЗАВТРА):
+        Для записи на ближайшие 2 дня:
         1. СНАЧАЛА вызови which_time_in_certain_day для получения доступных времен
-        2. ВНИМАТЕЛЬНО ИЗУЧИ полученный список доступных времен
-        3. ВЫБЕРИ время из списка доступных времен, которое наиболее соответствует запросу пользователя
-        4. ВЫЗОВИ reserve_reception_for_patient только с временем из списка доступных
+        2. ВЫБЕРИ время из списка доступных, что наиболее соответствует запросу
+        3. ВЫЗОВИ reserve_reception_for_patient с выбранным временем
 
-        ### 2. ДЛЯ ДАЛЬНИХ ДАТ (БОЛЕЕ ЧЕМ ЧЕРЕЗ 2 ДНЯ):
-
-        Для записи на даты далее чем послезавтра:
-
-        1. Вызови which_time_in_certain_day для получения доступных времен
-        2. НЕ ВЫЗЫВАЙ reserve_reception_for_patient автоматически
+        ### ДЛЯ ДАЛЬНИХ ДАТ (БОЛЕЕ ЧЕМ ЧЕРЕЗ 2 ДНЯ):
+        Для даты через 3 и более дней ОБЯЗАТЕЛЬНО:
+        1. Вызови which_time_in_certain_day с правильной датой
+        2. НЕ ВЫЗЫВАЙ reserve_reception_for_patient автоматически!
         3. ОСТАНОВИСЬ после получения списка времен
         4. Верни ответ со статусом which_time для показа пользователю
+
+        ### ПРИМЕРЫ ПРЕОБРАЗОВАНИЯ ДАТ:
+        - "через 4 дня" = сегодня + 4 дня = конкретная дата (например, 2025-05-14)
+        - "через неделю" = сегодня + 7 дней = конкретная дата (например, 2025-05-17)
+        - "послезавтра" = сегодня + 2 дня = конкретная дата (например, 2025-05-12)
+
+        ### ВАЖНО: Для выражения "через X дней", где X > 2, НИКОГДА не бронируй автоматически!
         """
 
         # Объединяем все инструкции
@@ -1529,19 +1638,28 @@ def extract_text_content(message):
         return ""
 
 
-def get_date_from_analysis(analysis_data):
+def get_date_from_analysis(analysis_data, user_input=""):
     """
-    Gets date object from analysis data.
+    Улучшенная функция для определения даты из анализа и текста запроса.
 
     Args:
-        analysis_data: Analysis data from assistant
+        analysis_data: Данные анализа запроса
+        user_input: Оригинальный текст запроса пользователя
 
     Returns:
-        datetime: Date object
+        datetime: Объект даты
     """
     try:
         today = datetime.now()
 
+        # Проверяем особые фразы в запросе
+        user_input_lower = user_input.lower()
+        if "после после завтра" in user_input_lower or "послепослезавтра" in user_input_lower:
+            return today + timedelta(days=3)
+        elif "послезавтра" in user_input_lower or "после завтра" in user_input_lower:
+            return today + timedelta(days=2)
+
+        # Обработка из analysis_data
         if analysis_data.get("date_type") == "tomorrow":
             return today + timedelta(days=1)
         elif analysis_data.get("date_type") == "day_after_tomorrow":
