@@ -96,7 +96,7 @@ def send_single_patient_to_acs(
 if __name__ == "__main__":
     # Пример использования с дополнительными параметрами
     send_single_patient_to_acs(
-        phone='77073032629',
+        phone='77070699434',
         full_name='Тест Иван Иванович',
         gp='00PP0consulta',
         additional_info={

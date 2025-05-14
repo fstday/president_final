@@ -311,15 +311,7 @@ def get_available_doctor_by_patient(patient_code):
 def select_best_doctor_from_schedules(schedules_by_doctor, target_date_str, target_time_str=None):
     """
     Выбирает лучшего врача из доступных с расписанием на указанную дату и время.
-    Учитывает блокирующие ограничения (CHECKCODE=2) и выбирает врачей без них в приоритете.
-
-    Args:
-        schedules_by_doctor: Словарь расписаний по врачам
-        target_date_str: Целевая дата в формате YYYY-MM-DD
-        target_time_str: Целевое время в формате HH:MM (опционально)
-
-    Returns:
-        tuple: (doctor_code, doctor_name, department_id, schedule_id)
+    Учитывает блокирующие ограничения (CHECKCODE=2) и выбирает ТОЛЬКО врачей без них.
     """
     best_doctor = None
     most_free_slots = 0
@@ -368,14 +360,17 @@ def select_best_doctor_from_schedules(schedules_by_doctor, target_date_str, targ
         else:
             doctors_without_blocking[doctor_code] = doctor_data
 
-    # Сперва пытаемся выбрать из врачей без блокирующих ограничений
-    target_doctors = doctors_without_blocking if doctors_without_blocking else doctors_with_blocking
+    # КРИТИЧЕСКИ ВАЖНОЕ ИЗМЕНЕНИЕ: Используем ТОЛЬКО врачей без блокирующих ограничений
+    # Если нет врачей без ограничений, не выбираем никакого врача
+    target_doctors = doctors_without_blocking
 
     logger.info(
         f"Найдено {len(doctors_without_blocking)} врачей без блокирующих ограничений и {len(doctors_with_blocking)} с блокирующими ограничениями")
 
     if not doctors_without_blocking and doctors_with_blocking:
-        logger.warning("Все доступные врачи имеют блокирующие ограничения (CHECKCODE=2)! Запись может не сработать.")
+        logger.warning("Все доступные врачи имеют блокирующие ограничения (CHECKCODE=2)! Запись невозможна.")
+        # Если все врачи имеют ограничения, возвращаем None чтобы показать, что выбор невозможен
+        return None, None, None, None
 
     for doctor_code, doctor_data in target_doctors.items():
         free_slots_count = 0

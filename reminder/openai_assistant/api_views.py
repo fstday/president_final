@@ -999,6 +999,7 @@ def process_voicebot_request(request):
            - Например, при запросе "через 4 дня" рассчитай дату путем прибавления 4 дней к текущей дате (2025-05-10 + 4 дня = 2025-05-14)
 
         2. Для выражений о будущем:
+           - "давайте лучше после завтра после обеда" = текущая дата + 2 дня
            - "послезавтра" = текущая дата + 2 дня (date_type = "day_after_tomorrow")
            - "после после завтра" = текущая дата + 3 дня (date_type = "specific_date" с конкретной датой)
            - "через неделю" = текущая дата + 7 дней (date_type = "specific_date" с конкретной датой)
@@ -1294,13 +1295,12 @@ def process_voicebot_request(request):
 
                         # Отправляем запрос к ассистенту
                         response = client.chat.completions.create(
-                            model="gpt-4",
+                            model="gpt-4o",
                             messages=[
                                 {"role": "system",
                                  "content": "You are a helpful assistant that selects the most appropriate time slot based on user's preferences."},
                                 {"role": "user", "content": time_selection_prompt}
                             ],
-                            max_tokens=20,
                             temperature=0.2
                         )
 

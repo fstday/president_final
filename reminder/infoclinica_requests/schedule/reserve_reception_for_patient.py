@@ -95,10 +95,49 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
                     by_doctor = cached_result.get('data', cached_result)['by_doctor']
                     logger.info(f"Найдено {len(by_doctor)} врачей в кэше")
 
+                    # ВАЖНОЕ ИЗМЕНЕНИЕ: Сначала отфильтруем врачей с ограничениями
+                    doctors_without_restrictions = {}
+                    doctors_with_restrictions = {}
+
+                    for doc_code, doctor_data in by_doctor.items():
+                        # Проверяем наличие флага ограничений
+                        has_restrictions = doctor_data.get('has_restrictions', False)
+
+                        # Также проверяем ограничения в расписаниях
+                        if not has_restrictions:
+                            for schedule in doctor_data.get('schedules', []):
+                                if 'check_data' in schedule:
+                                    check_data = schedule.get('check_data', [])
+                                    if isinstance(check_data, list):
+                                        for check in check_data:
+                                            if check.get('check_code') == '2':
+                                                has_restrictions = True
+                                                break
+                                    elif isinstance(check_data, dict) and check_data.get('check_code') == '2':
+                                        has_restrictions = True
+                                if has_restrictions:
+                                    break
+
+                        # Распределяем врачей
+                        if has_restrictions:
+                            doctors_with_restrictions[doc_code] = doctor_data
+                        else:
+                            doctors_without_restrictions[doc_code] = doctor_data
+
+                    # Используем только врачей без ограничений
+                    filtered_by_doctor = doctors_without_restrictions
+                    logger.info(f"После фильтрации ограничений осталось {len(filtered_by_doctor)} врачей")
+
+                    if not filtered_by_doctor:
+                        return JsonResponse({
+                            "status": "error_med_element",
+                            "message": "Нет доступных врачей без ограничений для записи"
+                        })
+
                     # Находим врачей с доступными слотами на запрашиваемую дату
                     available_doctors = []
 
-                    for doc_code, doctor_data in by_doctor.items():
+                    for doc_code, doctor_data in filtered_by_doctor.items():
                         for schedule in doctor_data.get('schedules', []):
                             if (schedule.get('date_iso') == requested_date and
                                     schedule.get('has_free_slots', False)):
@@ -147,31 +186,11 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
                             logger.error(f"Ошибка при сохранении врача: {e}")
                     else:
                         logger.warning(f"Не найдено врачей с доступными слотами на {requested_date}")
-                        # Используем первого доступного врача из отделения (последний запас)
-                        if by_doctor:
-                            first_available_doctor = next(iter(by_doctor.items()))
-                            doctor_code = first_available_doctor[0]
-                            doctor_name = first_available_doctor[1].get('doctor_name', '')
-                            department_id = first_available_doctor[1].get('department_id', department_id)
-
-                            try:
-                                doctor_obj, _ = Doctor.objects.get_or_create(
-                                    doctor_code=doctor_code,
-                                    defaults={'full_name': doctor_name}
-                                )
-
-                                patient.last_used_doctor = doctor_obj
-                                patient.save()
-
-                                # Сохраняем ассоциацию врача с пациентом
-                                PatientDoctorAssociation.objects.update_or_create(
-                                    patient=patient,
-                                    defaults={'doctor': doctor_obj}
-                                )
-
-                                logger.info(f"Выбран запасной вариант врача {doctor_code} для пациента {patient_id}")
-                            except Exception as e:
-                                logger.error(f"Ошибка при сохранении запасного врача: {e}")
+                        # НЕ используем врачей с ограничениями в качестве запасного варианта
+                        return JsonResponse({
+                            "status": "error_empty_windows",
+                            "message": f"На {requested_date} нет свободных слотов для записи у доступных врачей"
+                        })
 
         # Если все еще нет врача, но есть отделение, пробуем сделать прямой запрос
         if not doctor_code and department_id:
@@ -181,9 +200,15 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
                 direct_schedule = get_patient_doctor_schedule(patient_id, days_horizon=1)
 
                 if direct_schedule.get('success') and direct_schedule.get('by_doctor'):
+                    # ВАЖНОЕ ИЗМЕНЕНИЕ: Отфильтруем врачей с ограничениями
+                    filtered_doctors = {}
+                    for doc_code, doctor_data in direct_schedule['by_doctor'].items():
+                        if not doctor_data.get('has_restrictions', False):
+                            filtered_doctors[doc_code] = doctor_data
+
                     available_doctors = []
 
-                    for doc_code, doctor_data in direct_schedule['by_doctor'].items():
+                    for doc_code, doctor_data in filtered_doctors.items():
                         for schedule in doctor_data.get('schedules', []):
                             if schedule.get('date_iso') == requested_date and schedule.get('has_free_slots', False):
                                 available_doctors.append({
@@ -198,6 +223,10 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
                         logger.info(f"Найден врач через прямой запрос: {doctor_code}")
                     else:
                         logger.warning("Не найдено врачей с доступными слотами через прямой запрос")
+                        return JsonResponse({
+                            "status": "error_empty_windows",
+                            "message": f"На {requested_date} нет доступных врачей"
+                        })
             except Exception as e:
                 logger.error(f"Ошибка при прямом запросе расписания: {e}")
 
@@ -253,6 +282,14 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
                 })
             else:
                 return JsonResponse(times_data)
+
+        # ВАЖНОЕ ИЗМЕНЕНИЕ: Проверяем на наличие ограничений в ответе
+        if 'requires_referral' in times_data and times_data['requires_referral'] or 'referral_message' in times_data and \
+                times_data['referral_message']:
+            return JsonResponse({
+                "status": "error_med_element",
+                "message": times_data.get('referral_message', "Запись невозможна из-за ограничений.")
+            })
 
         # Извлекаем доступные времена
         available_times = []
@@ -418,6 +455,27 @@ def reserve_reception_for_patient(patient_id, date_from_patient, trigger_id=1):
                 root = ET.fromstring(response.text)
                 logger.debug(f"Тело ответа: {response.text[:500]}...")  # Логируем первые 500 символов ответа
                 namespace = {'ns': 'http://sdsys.ru/'}
+
+                # ВАЖНОЕ ИЗМЕНЕНИЕ: Проверяем ограничения перед получением schedident
+                check_elements = root.findall('.//ns:CHECKDATA', namespace)
+                has_restrictions = False
+
+                if check_elements:
+                    for check in check_elements:
+                        check_code = check.find('ns:CHECKCODE', namespace)
+                        if check_code is not None and check_code.text == '2':
+                            has_restrictions = True
+                            check_label = check.find('ns:CHECKLABEL', namespace)
+                            check_text = check.find('ns:CHECKTEXT', namespace)
+                            restriction_message = check_text.text if check_text is not None else check_label.text if check_label is not None else "Ограничение по возрасту"
+
+                            logger.warning(f"Обнаружено ограничение: {restriction_message}")
+
+                            # Если есть ограничение, возвращаем ошибку
+                            return JsonResponse({
+                                "status": "error_med_element",
+                                "message": restriction_message
+                            })
 
                 # Получаем SCHEDIDENT из SCHEDINT
                 schedint = root.find('.//ns:SCHEDINT', namespace)
