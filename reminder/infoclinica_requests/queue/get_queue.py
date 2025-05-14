@@ -46,7 +46,7 @@ def get_queue():
         # Даты запроса
         today = datetime.now()
         bdate = today.strftime("%Y%m%d")
-        fdate = (today + timedelta(days=365)).strftime("%Y%m%d")
+        fdate = (today + timedelta(days=31)).strftime("%Y%m%d")
 
         # XML-запрос
         xml_request = f'''
